@@ -44,7 +44,16 @@ const APP_HTML: &str = r#"<!doctype html>
         <div class="brand-title">mviewer</div>
         <div class="brand-subtitle">github.com/majimboo</div>
       </div>
-      <div class="path" id="inputPath">Open a .mview file</div>
+      <div class="path">
+        <input class="path-text" id="inputPath" type="text" readonly aria-label="Current model path" placeholder="Open a .mview file" spellcheck="false" />
+        <button class="clear-scene-button" id="clearSceneButton" type="button" onclick="post({cmd:'clearProject'})" title="Clear scene" aria-label="Clear scene" disabled>
+          <span class="button-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </span>
+        </button>
+      </div>
       <button onclick="openSourceDialog()" title="Open .mview">
         <span class="button-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -85,7 +94,12 @@ const APP_HTML: &str = r#"<!doctype html>
               <div class="options-section">
                 <div class="options-heading">Local File</div>
                 <div class="tool-input-row">
-                  <input id="localPathInput" class="tool-input tool-input-clickable" type="text" placeholder="Click to choose a local .mview file" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" readonly onclick="browseLocalFile()" />
+                  <div class="source-input">
+                    <input id="localPathInput" class="tool-input tool-input-clickable" type="text" placeholder="Click to choose a local .mview file" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" readonly onclick="browseLocalFile()" />
+                    <button class="clear-input-button" id="clearLocalPathButton" type="button" onclick="clearSourceInput('localPathInput')" title="Clear local file" aria-label="Clear local file" disabled>
+                      <span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18" /></svg></span>
+                    </button>
+                  </div>
                   <button type="button" onclick="submitOpenLocal()">Open</button>
                 </div>
               </div>
@@ -95,7 +109,12 @@ const APP_HTML: &str = r#"<!doctype html>
                   Paste a direct <code>.mview</code> URL, or a supported page URL that exposes a public <code>.mview</code> file.
                 </div>
                 <div class="tool-input-row">
-                  <input id="downloadUrlInput" class="tool-input" type="text" inputmode="url" placeholder="https://www.artstation.com/artwork/3LBbA" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+                  <div class="source-input">
+                    <input id="downloadUrlInput" class="tool-input" type="text" inputmode="url" placeholder="https://www.artstation.com/artwork/3LBbA" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" oninput="syncSourceClearButtons()" />
+                    <button class="clear-input-button" id="clearUrlButton" type="button" onclick="clearSourceInput('downloadUrlInput')" title="Clear URL" aria-label="Clear URL" disabled>
+                      <span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18" /></svg></span>
+                    </button>
+                  </div>
                   <button class="primary" type="button" onclick="submitDownloadUrl()">Load URL</button>
                 </div>
                 <div class="tool-link-row">
@@ -210,16 +229,19 @@ const APP_HTML: &str = r#"<!doctype html>
       window.__mviewerArchiveCaptureInstalled = true;
       const originalFetchBinary = Network.fetchBinary.bind(Network);
       Network.fetchBinary = function(url, onload, onerror, onprogress) {
+        const isSceneRequest = String(url).includes('/scene/current.mview');
+        const isCurrentRequest = () => !isSceneRequest || String(url) === runtimeViewerSceneUrl;
         return originalFetchBinary(
           url,
           function(buffer) {
-            if (String(url).includes('/scene/current.mview')) {
+            if (!isCurrentRequest()) return;
+            if (isSceneRequest) {
               currentArchiveBuffer = buffer;
             }
             onload && onload(buffer);
           },
-          onerror,
-          onprogress,
+          (...args) => { if (isCurrentRequest()) onerror?.(...args); },
+          (...args) => { if (isCurrentRequest()) onprogress?.(...args); },
         );
       };
     }
@@ -249,6 +271,21 @@ const APP_HTML: &str = r#"<!doctype html>
 
     function renderEmptySceneState() {
       document.getElementById('previewMeta').textContent = 'No scene loaded.';
+    }
+
+    function clearPreview() {
+      const viewer = runtimeViewer;
+      runtimeViewer = null;
+      runtimeViewerSceneUrl = null;
+      currentArchiveBuffer = null;
+      pendingExportSnapshot = null;
+      if (viewer) {
+        viewer.onLoad = null;
+        viewer.unload();
+      }
+      document.getElementById('previewHost').replaceChildren();
+      document.getElementById('meshList').replaceChildren();
+      closeExportDialog();
     }
 
     let exportTicker = null;
@@ -375,6 +412,7 @@ const APP_HTML: &str = r#"<!doctype html>
     }
 
     function openSourceDialog() {
+      syncSourceClearButtons();
       document.getElementById('sourceOverlay').classList.remove('hidden');
     }
 
@@ -384,6 +422,21 @@ const APP_HTML: &str = r#"<!doctype html>
 
     function browseLocalFile() {
       post({ cmd: 'browseLocalFile' });
+    }
+
+    function syncSourceClearButtons() {
+      document.getElementById('clearLocalPathButton').disabled = !document.getElementById('localPathInput').value;
+      document.getElementById('clearUrlButton').disabled = !document.getElementById('downloadUrlInput').value;
+    }
+
+    function clearSourceInput(id) {
+      const input = document.getElementById(id);
+      input.value = '';
+      if (id === 'localPathInput') {
+        post({ cmd: 'clearLocalPath' });
+      }
+      syncSourceClearButtons();
+      input.focus();
     }
 
     function submitOpenLocal() {
@@ -477,8 +530,13 @@ const APP_HTML: &str = r#"<!doctype html>
 
     window.__mviewerReceive = function(state) {
       latestState = state;
-      document.getElementById('inputPath').textContent = state.input_path || 'Open a .mview file';
+      const pathInput = document.getElementById('inputPath');
+      const inputPath = state.input_path || '';
+      if (pathInput.value !== inputPath) pathInput.value = inputPath;
+      pathInput.title = inputPath;
+      document.getElementById('clearSceneButton').disabled = !state.loaded || !!state.loading_scene || !!state.exporting;
       document.getElementById('localPathInput').value = state.local_path_draft || '';
+      syncSourceClearButtons();
       document.getElementById('outputDirText').textContent = state.output_dir || 'Choose an output folder';
       document.getElementById('status').textContent = state.status || 'Ready.';
       renderRecentDatalist('recentLocalList', state.recent_files);
@@ -495,8 +553,7 @@ const APP_HTML: &str = r#"<!doctype html>
         if (!state.loading_scene) {
           setPreviewLoading(false);
         }
-        runtimeViewerSceneUrl = null;
-        runtimeViewer = null;
+        clearPreview();
         renderEmptySceneState();
       }
     };
@@ -513,8 +570,7 @@ const APP_HTML: &str = r#"<!doctype html>
         return;
       }
       setPreviewLoading(true, latestState?.loading_message || 'Loading preview…');
-      host.innerHTML = '';
-      currentArchiveBuffer = null;
+      clearPreview();
       const width = Math.max(320, host.clientWidth || 960);
       const height = Math.max(180, host.clientHeight || 540);
       try {
@@ -528,7 +584,9 @@ const APP_HTML: &str = r#"<!doctype html>
       runtimeViewer.domRoot.style.width = '100%';
       runtimeViewer.domRoot.style.height = '100%';
       host.appendChild(runtimeViewer.domRoot);
+      const viewer = runtimeViewer;
       runtimeViewer.onLoad = () => {
+        if (runtimeViewer !== viewer) return;
         setPreviewLoading(false);
         setStatus('Preview loaded.');
         post({ cmd: 'previewLoaded' });
@@ -618,6 +676,8 @@ struct ProtocolState {
 enum FrontendCommand {
     Ready,
     OpenProject,
+    ClearProject,
+    ClearLocalPath,
     BrowseLocalFile,
     PreviewLoaded,
     OpenRecentFile {
@@ -802,7 +862,15 @@ pub fn run() -> Result<()> {
             }
             Event::UserEvent(UserEvent::DownloadFinished { result }) => {
                 match result {
-                    Ok(path) => open_project_path(&mut state, &protocol_state, path),
+                    Ok(path) => {
+                        if state.output_dir.trim().is_empty() {
+                            let exports = UserDirs::new()
+                                .and_then(|dirs| dirs.document_dir().map(|path| path.join("mviewer-exports")))
+                                .unwrap_or_else(|| PathBuf::from("exports"));
+                            state.output_dir = exports.display().to_string();
+                        }
+                        open_project_path(&mut state, &protocol_state, path);
+                    }
                     Err(err) => {
                         finish_loading(&mut state);
                         state.status = format!("Download failed: {err}");
@@ -857,6 +925,8 @@ fn handle_command(
     match command {
         FrontendCommand::Ready => {}
         FrontendCommand::OpenProject => open_project(state, protocol_state),
+        FrontendCommand::ClearProject => clear_project(state, protocol_state),
+        FrontendCommand::ClearLocalPath => state.local_path_draft.clear(),
         FrontendCommand::BrowseLocalFile => browse_local_file(state),
         FrontendCommand::PreviewLoaded => {
             finish_loading(state);
@@ -937,6 +1007,27 @@ fn open_project_path(
     remember_recent_file(&mut state.settings, &path);
     state.settings.last_opened_file = Some(path.display().to_string());
     state.settings.last_output_dir = Some(state.output_dir.clone());
+    persist_settings(state);
+}
+
+fn clear_project(state: &mut AppState, protocol_state: &Arc<Mutex<ProtocolState>>) {
+    if state.exporting || state.loading_scene {
+        return;
+    }
+    state.input_path = None;
+    state.local_path_draft.clear();
+    state.js_export_scene = None;
+    state.scene_revision = state.scene_revision.saturating_add(1);
+    finish_loading(state);
+    state.export_progress = 0;
+    state.export_stage.clear();
+    state.export_started_at_ms = None;
+    state.export_eta_seconds = None;
+    state.settings.last_opened_file = None;
+    if let Ok(mut shared) = protocol_state.lock() {
+        shared.current_scene_path = None;
+    }
+    state.status = "Scene cleared. Open a .mview file to continue.".to_string();
     persist_settings(state);
 }
 
@@ -1070,8 +1161,9 @@ fn start_download_job(
     remember_recent_url(&mut state.settings, &url);
     persist_settings(state);
     let proxy = proxy.clone();
+    let current_scene = state.input_path.clone();
     thread::spawn(move || {
-        let result = download_scene_from_url(&url).map_err(|err| format!("{err:#}"));
+        let result = download_scene_from_url(&url, current_scene.as_deref()).map_err(|err| format!("{err:#}"));
         let _ = proxy.send_event(UserEvent::DownloadFinished { result });
     });
 }
@@ -1458,29 +1550,15 @@ fn start_artstation_resolver(
     })
 }
 
-fn download_scene_from_url(page_or_file_url: &str) -> Result<PathBuf> {
+fn download_scene_from_url(page_or_file_url: &str, current_scene: Option<&Path>) -> Result<PathBuf> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("mviewer/2.1.0")
+        .user_agent(concat!("mviewer/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("failed to create HTTP client")?;
     let scene_url = resolve_mview_url(&client, page_or_file_url)?;
-    let filename = file_name_from_url(&scene_url).unwrap_or_else(|| "scene.mview".to_string());
-    let download_dir = UserDirs::new()
-        .and_then(|dirs| dirs.download_dir().map(PathBuf::from))
-        .or_else(|| std::env::current_dir().ok())
-        .context("failed to resolve download directory")?;
-    std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
-    let output_path = unique_output_path(download_dir.join(filename));
-    let bytes = client
-        .get(scene_url.clone())
-        .send()
-        .with_context(|| format!("failed to download {}", scene_url))?
-        .error_for_status()
-        .with_context(|| format!("download failed for {}", scene_url))?
-        .bytes()
-        .context("failed to read download body")?;
-    std::fs::write(&output_path, &bytes).with_context(|| format!("failed to write {}", output_path.display()))?;
-    Ok(output_path)
+    let dirs = ProjectDirs::from("com", "majidarif", "mviewer")
+        .context("failed to resolve scene cache directory")?;
+    super::download_cache::load(&client, &scene_url, &dirs.cache_dir().join("scenes"), current_scene)
 }
 
 fn resolve_mview_url(client: &reqwest::blocking::Client, page_or_file_url: &str) -> Result<reqwest::Url> {
@@ -1655,25 +1733,79 @@ fn is_url_delimiter(ch: char) -> bool {
         || matches!(ch, '"' | '\'' | '`' | '<' | '>' | '(' | ')' | '{' | '}' | '[' | ']')
 }
 
-fn file_name_from_url(url: &reqwest::Url) -> Option<String> {
-    url.path_segments()
-        .and_then(|segments| segments.last())
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| segment.to_string())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn unique_output_path(path: PathBuf) -> PathBuf {
-    if !path.exists() {
-        return path;
-    }
-    let parent = path.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("scene");
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("mview");
-    for index in 2..1000 {
-        let candidate = parent.join(format!("{stem}-{index}.{ext}"));
-        if !candidate.exists() {
-            return candidate;
+    fn test_state(settings_path: PathBuf) -> AppState {
+        AppState {
+            input_path: None,
+            local_path_draft: String::new(),
+            output_dir: "exports".to_string(),
+            status: String::new(),
+            base_url: "http://127.0.0.1:12345".to_string(),
+            scene_revision: 0,
+            loading_scene: false,
+            loading_message: String::new(),
+            exporting: false,
+            export_progress: 0,
+            export_stage: String::new(),
+            export_started_at_ms: None,
+            export_eta_seconds: None,
+            export_job_id: 0,
+            settings: AppSettings::default(),
+            settings_path,
+            js_export_scene: None,
         }
     }
-    path
+
+    #[test]
+    fn clear_unloads_scene_and_persists_empty_selection_then_allows_reopening() {
+        let settings_path = std::env::temp_dir().join(format!(
+            "mviewer-clear-{}-{}.json", std::process::id(), now_ms()
+        ));
+        let mut state = test_state(settings_path.clone());
+        let shared = Arc::new(Mutex::new(ProtocolState::default()));
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/vivfox.mview");
+        open_project_path(&mut state, &shared, fixture.clone());
+        finish_loading(&mut state);
+        state.js_export_scene = Some(serde_json::from_value(serde_json::json!({
+            "source": "test", "version": 1, "selectedAnimationIndex": 0,
+            "archiveBase64": "cached archive"
+        })).unwrap());
+        let previous_url = build_view_state(&state).scene_url;
+
+        clear_project(&mut state, &shared);
+
+        let view = build_view_state(&state);
+        assert!(!view.loaded);
+        assert!(view.input_path.is_none());
+        assert!(view.scene_url.is_none());
+        assert!(view.local_path_draft.is_empty());
+        assert!(state.js_export_scene.is_none());
+        assert_eq!(state.output_dir, "exports");
+        assert_eq!(state.settings.recent_files.len(), 1);
+        assert!(load_settings(&settings_path).last_opened_file.is_none());
+        assert_eq!(handle_http_request(Method::Get, "/scene/current.mview", &shared).status_code(), StatusCode(404));
+
+        open_project_path(&mut state, &shared, fixture);
+        assert!(build_view_state(&state).loaded);
+        assert_ne!(build_view_state(&state).scene_url, previous_url);
+        assert_eq!(handle_http_request(Method::Get, "/scene/current.mview", &shared).status_code(), StatusCode(200));
+        std::fs::remove_file(settings_path).unwrap();
+    }
+
+    #[test]
+    fn clear_does_not_interrupt_loading_or_exporting() {
+        let mut state = test_state(PathBuf::new());
+        let shared = Arc::new(Mutex::new(ProtocolState::default()));
+        state.input_path = Some(PathBuf::from("scene.mview"));
+        state.loading_scene = true;
+        clear_project(&mut state, &shared);
+        assert!(state.input_path.is_some());
+        state.loading_scene = false;
+        state.exporting = true;
+        clear_project(&mut state, &shared);
+        assert!(state.input_path.is_some());
+    }
 }

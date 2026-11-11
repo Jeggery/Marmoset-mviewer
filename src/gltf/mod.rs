@@ -1,5 +1,7 @@
 mod animated;
 mod textures;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -15,10 +17,7 @@ use crate::archive::Archive;
 use crate::js_export::JsExportScene;
 use crate::mesh::{DecodedMesh, decode_mesh};
 use crate::scene::{Lights, MainCamera, MaterialDesc, Scene, ViewDesc};
-use textures::{
-    merge_alpha_texture, merge_alpha_texture_bytes, merge_metallic_roughness_texture,
-    merge_metallic_roughness_texture_bytes, merged_alpha_name, merged_metallic_roughness_name,
-};
+use textures::bake_metallic_roughness;
 
 #[derive(Clone, Copy)]
 pub enum GltfOutputFormat {
@@ -197,34 +196,29 @@ impl GltfBuilder {
         output_dir: &Path,
         texture_cache: &mut HashMap<String, usize>,
     ) -> Result<usize> {
-        let base_color_texture = self.ensure_base_color_texture(
-            archive,
-            &material.albedo_tex,
-            material.alpha_tex.as_deref(),
-            output_dir,
-            texture_cache,
-        )?;
-
-        let normal_texture = if let Some(name) = &material.normal_tex {
-            Some(self.ensure_texture_file(archive, name, output_dir, texture_cache)?)
-        } else {
-            None
+        let source = |name: Option<&str>| -> Result<Option<&[u8]>> {
+            name.filter(|name| !name.is_empty()).map(|name| {
+                archive.get(name).map(|entry| entry.data.as_slice())
+                    .with_context(|| format!("missing texture {name}"))
+            }).transpose()
         };
-        let metallic_roughness_texture = match (
-            material.reflectivity_tex.as_deref(),
-            material.gloss_tex.as_deref(),
-        ) {
-            (Some(reflectivity_name), Some(gloss_name)) => Some(
-                self.ensure_metallic_roughness_texture(
-                    archive,
-                    reflectivity_name,
-                    gloss_name,
-                    output_dir,
-                    texture_cache,
-                )?,
-            ),
-            _ => None,
-        };
+        let baked = bake_metallic_roughness(
+            source(Some(&material.albedo_tex))?,
+            source(material.alpha_tex.as_deref())?,
+            source(material.reflectivity_tex.as_deref())?,
+            source(material.gloss_tex.as_deref())?,
+            material.ggx_specular.unwrap_or(false),
+        ).with_context(|| format!("failed to convert material {}", material.name))?;
+        let material_id = self.materials.len();
+        let base_color_texture = self.add_baked_texture(
+            format!("material_{material_id}_basecolor.png"), baked.base_color,
+        );
+        let metallic_roughness_texture = self.add_baked_texture(
+            format!("material_{material_id}_metalrough.png"), baked.metallic_roughness,
+        );
+        let normal_texture = material.normal_tex.as_deref().map(|name| {
+            self.ensure_texture_file(archive, name, output_dir, texture_cache)
+        }).transpose()?;
 
         let alpha_mode = match material.blend.as_deref() {
             Some("alpha") | Some("add") => Some("BLEND".to_string()),
@@ -248,8 +242,8 @@ impl GltfBuilder {
                 }),
                 metallic_factor: Some(1.0),
                 roughness_factor: Some(1.0),
-                metallic_roughness_texture: metallic_roughness_texture.map(|index| TextureRef {
-                    index,
+                metallic_roughness_texture: Some(TextureRef {
+                    index: metallic_roughness_texture,
                     tex_coord: None,
                 }),
             }),
@@ -272,53 +266,17 @@ impl GltfBuilder {
         Ok(material_index)
     }
 
-    fn ensure_base_color_texture(
-        &mut self,
-        archive: &Archive,
-        albedo_name: &str,
-        alpha_name: Option<&str>,
-        output_dir: &Path,
-        texture_cache: &mut HashMap<String, usize>,
-    ) -> Result<usize> {
-        if let Some(alpha_name) = alpha_name {
-            let merged_name = merged_alpha_name(albedo_name);
-            if let Some(index) = texture_cache.get(&merged_name) {
-                return Ok(*index);
-            }
-
-            let albedo = archive
-                .get(albedo_name)
-                .with_context(|| format!("missing texture {}", albedo_name))?;
-            let alpha = archive
-                .get(alpha_name)
-                .with_context(|| format!("missing texture {}", alpha_name))?;
-
-            let merged_path = output_dir.join(&merged_name);
-            merge_alpha_texture(&albedo.data, &alpha.data, &merged_path)
-                .with_context(|| format!("failed to merge {} and {}", albedo_name, alpha_name))?;
-
-            let image_index = self.images.len();
-            self.images.push(ImageDef {
-                uri: Some(merged_name.clone()),
-                buffer_view: None,
-                mime_type: None,
-                name: Some(merged_name.clone()),
-            });
-            self.image_sources.push(ImageSource {
-                name: merged_name.clone(),
-                mime_type: "image/png".to_string(),
-                data: merge_alpha_texture_bytes(&albedo.data, &alpha.data)?,
-            });
-            let texture_index = self.textures.len();
-            self.textures.push(TextureDef {
-                source: image_index,
-                name: Some(merged_name.clone()),
-            });
-            texture_cache.insert(merged_name, texture_index);
-            return Ok(texture_index);
-        }
-
-        self.ensure_texture_file(archive, albedo_name, output_dir, texture_cache)
+    fn add_baked_texture(&mut self, name: String, data: Vec<u8>) -> usize {
+        let image_index = self.images.len();
+        self.images.push(ImageDef {
+            uri: Some(name.clone()), buffer_view: None, mime_type: None, name: Some(name.clone()),
+        });
+        self.image_sources.push(ImageSource {
+            name: name.clone(), mime_type: "image/png".to_string(), data,
+        });
+        let texture_index = self.textures.len();
+        self.textures.push(TextureDef { source: image_index, name: Some(name) });
+        texture_index
     }
 
     fn ensure_texture_file(
@@ -359,51 +317,6 @@ impl GltfBuilder {
             name: Some(name.to_string()),
         });
         texture_cache.insert(name.to_string(), texture_index);
-        Ok(texture_index)
-    }
-
-    fn ensure_metallic_roughness_texture(
-        &mut self,
-        archive: &Archive,
-        reflectivity_name: &str,
-        gloss_name: &str,
-        output_dir: &Path,
-        texture_cache: &mut HashMap<String, usize>,
-    ) -> Result<usize> {
-        let merged_name = merged_metallic_roughness_name(reflectivity_name);
-        if let Some(index) = texture_cache.get(&merged_name) {
-            return Ok(*index);
-        }
-
-        let reflectivity = archive
-            .get(reflectivity_name)
-            .with_context(|| format!("missing texture {}", reflectivity_name))?;
-        let gloss = archive
-            .get(gloss_name)
-            .with_context(|| format!("missing texture {}", gloss_name))?;
-
-        let merged_path = output_dir.join(&merged_name);
-        merge_metallic_roughness_texture(&reflectivity.data, &gloss.data, &merged_path)
-            .with_context(|| format!("failed to merge {} and {}", reflectivity_name, gloss_name))?;
-
-        let image_index = self.images.len();
-        self.images.push(ImageDef {
-            uri: Some(merged_name.clone()),
-            buffer_view: None,
-            mime_type: None,
-            name: Some(merged_name.clone()),
-        });
-        self.image_sources.push(ImageSource {
-            name: merged_name.clone(),
-            mime_type: "image/png".to_string(),
-            data: merge_metallic_roughness_texture_bytes(&reflectivity.data, &gloss.data)?,
-        });
-        let texture_index = self.textures.len();
-        self.textures.push(TextureDef {
-            source: image_index,
-            name: Some(merged_name.clone()),
-        });
-        texture_cache.insert(merged_name, texture_index);
         Ok(texture_index)
     }
 
@@ -497,6 +410,10 @@ impl GltfBuilder {
     ) -> Result<usize> {
         let position_accessor = self.push_f32x3(&decoded.positions, Target::ArrayBuffer);
         let normal_accessor = self.push_f32x3(&decoded.normals, Target::ArrayBuffer);
+        let tangents: Vec<_> = decoded.normals.iter().zip(&decoded.tangents).zip(&decoded.bitangents)
+            .map(|((normal, tangent), bitangent)| gltf_tangent(*normal, *tangent, *bitangent))
+            .collect();
+        let tangent_accessor = self.push_f32x4(&tangents, Target::ArrayBuffer);
         let texcoord_accessor = self.push_f32x2(&decoded.texcoords, Target::ArrayBuffer);
         let color_accessor = decoded
             .colors
@@ -517,6 +434,7 @@ impl GltfBuilder {
                 attributes: Attributes {
                     position: position_accessor,
                     normal: Some(normal_accessor),
+                    tangent: Some(tangent_accessor),
                     texcoord_0: Some(texcoord_accessor),
                     color_0: color_accessor,
                     joints_0: joints_accessor,
@@ -632,6 +550,8 @@ impl GltfBuilder {
                 self.buffer.extend_from_slice(&data);
                 let view_index =
                     self.push_buffer_view(start, self.buffer.len() - start, Target::ArrayBuffer);
+                // Image payloads are not GPU vertex buffers.
+                self.buffer_views[view_index].target = None;
                 if let Some(def) = self.images.get_mut(image_index) {
                     def.uri = None;
                     def.buffer_view = Some(view_index);
@@ -1490,6 +1410,22 @@ fn rotation_matrix(angle: f32, axis: usize) -> [f32; 16] {
     }
 }
 
+fn gltf_tangent(normal: [f32; 3], tangent: [f32; 3], bitangent: [f32; 3]) -> [f32; 4] {
+    let normal = normalize_vec3(normal);
+    let projection: f32 = (0..3).map(|i| normal[i] * tangent[i]).sum();
+    let mut tangent = std::array::from_fn(|i| tangent[i] - normal[i] * projection);
+    if vec3_len(tangent) < 1e-6 {
+        let axis = if normal[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        tangent = cross(axis, normal);
+    }
+    let tangent = normalize_vec3(tangent);
+    let reconstructed = cross(normal, tangent);
+    let orientation: f32 = (0..3).map(|i| reconstructed[i] * bitangent[i]).sum();
+    // Preserve Marmoset's authored TBN frame instead of asking each viewer to
+    // derive a potentially different frame from the converted UVs.
+    [tangent[0], tangent[1], tangent[2], if orientation < 0.0 { -1.0 } else { 1.0 }]
+}
+
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -1604,6 +1540,8 @@ pub struct Attributes {
     pub position: usize,
     #[serde(rename = "NORMAL", skip_serializing_if = "Option::is_none")]
     pub normal: Option<usize>,
+    #[serde(rename = "TANGENT", skip_serializing_if = "Option::is_none")]
+    pub tangent: Option<usize>,
     #[serde(rename = "TEXCOORD_0", skip_serializing_if = "Option::is_none")]
     pub texcoord_0: Option<usize>,
     #[serde(rename = "COLOR_0", skip_serializing_if = "Option::is_none")]

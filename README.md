@@ -111,6 +111,24 @@ The current GUI supports:
 - choosing export options per format
 - remembering the last export defaults and recent files
 
+URL-loaded models are stored in the application's local cache directory under
+`scenes/<URL hash>/<model name>.mview`, rather than the Downloads folder. Reopening
+the same model URL reuses its path and checks the server's ETag/Last-Modified
+headers for updates; servers without these headers refresh the same cached file.
+Downloads are validated before replacing cached models, so a failed download
+does not overwrite an existing model.
+
+The cache automatically removes the least recently used models when it exceeds
+32 entries or 512 MiB. The current model and the newly loaded model are protected
+during cleanup, so these limits can temporarily be exceeded. Individual downloads
+larger than 512 MiB are rejected. Previously downloaded files in Downloads are
+left untouched. When no export folder has been chosen, URL models default to
+`Documents/mviewer-exports` (or `exports` if Documents is unavailable).
+
+The toolbar model path supports mouse selection and copying. Clear buttons in
+Choose Source only clear the corresponding input; the toolbar clear button
+unloads the current model.
+
 ## Output Formats
 
 mviewer exports `.mview` scenes to glTF and GLB directly.
@@ -124,6 +142,16 @@ If you need other formats:
 - `mview to blender`: import the generated glTF into Blender
 
 glTF is the primary interchange format because it preserves modern materials, skins, animation, cameras, and lights better than the old script-based workflow.
+
+Material export bakes Marmoset's diffuse/specular/gloss textures into standard
+glTF `pbrMetallicRoughness`: sRGB base color and linear roughness (G) / metallic
+(B). Colored specular reflection contributes to the reconstructed metal base
+color. Marmoset's squared color encoding is decoded before conversion, and
+legacy Blinn-Phong gloss is approximately converted to GGX roughness. Authored
+tangent frames are exported for consistent normal mapping across viewers.
+This is an approximation for materials outside the core metal/rough model;
+Marmoset-specific additive glass, Fresnel controls, environment lighting and
+post-processing are not reproduced exactly by ordinary glTF materials.
 
 ## Build From Source
 
