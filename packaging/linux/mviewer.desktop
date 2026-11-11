@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=mviewer
-Comment=Inspect and export Marmoset .mview scenes
+Name=Marmoset-mviewer
+Comment=Inspect and export Marmoset .mview scenes (Jeggery fork)
 Exec=mviewer
 Icon=mviewer
 Terminal=false

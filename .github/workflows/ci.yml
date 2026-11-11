@@ -10,6 +10,16 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  release-metadata:
+    name: Test release metadata validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Test
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -44,7 +54,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked --lib
 
   verify-export:
     name: Verify sample export
@@ -72,7 +85,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Export vivfox sample
-        run: cargo run --release --bin mviewer -- test_data/vivfox.mview test_output/vivfox
+        run: cargo run --release --locked --bin mviewer -- test_data/vivfox.mview test_output/vivfox
 
       - name: Check expected outputs
         run: |
@@ -80,7 +93,7 @@ jobs:
           test -f test_output/vivfox/vivfox.bin
 
       - name: Export vivfox sample as GLB
-        run: cargo run --release --bin mviewer -- test_data/vivfox.mview test_output/vivfox_glb --format glb
+        run: cargo run --release --locked --bin mviewer -- test_data/vivfox.mview test_output/vivfox_glb --format glb
 
       - name: Check expected GLB output
         run: |

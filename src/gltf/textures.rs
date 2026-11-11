@@ -4,6 +4,24 @@ use image::{Rgba, RgbaImage, imageops::FilterType};
 pub(super) struct BakedPbr {
     pub base_color: Vec<u8>,
     pub metallic_roughness: Vec<u8>,
+    // Linear values, before PNG quantization. Uniform maps need no image.
+    pub base_color_factor: Option<[f32; 4]>,
+    pub metallic_roughness_factors: Option<[f32; 2]>, // metallic, roughness
+}
+
+pub(super) fn is_neutral_normal(bytes: &[u8]) -> bool {
+    let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok());
+    if dimensions != Some((1, 1)) {
+        return false;
+    }
+    let Ok(image) = image::load_from_memory(bytes) else {
+        return false;
+    };
+    let pixel = image.to_rgba8().get_pixel(0, 0).0;
+    (127..=128).contains(&pixel[0]) && (127..=128).contains(&pixel[1]) && pixel[2] >= 254
 }
 
 fn decode(bytes: Option<&[u8]>) -> Result<Option<RgbaImage>> {
@@ -111,6 +129,10 @@ pub(super) fn bake_metallic_roughness(
     let [albedo, alpha, reflectivity, gloss] = images.map(|image| resize(image, width, height));
     let mut base_color = RgbaImage::new(width, height);
     let mut metal_rough = RgbaImage::new(width, height);
+    let mut first_base = [0.0; 4];
+    let mut first_mr = [0.0; 2];
+    let mut uniform_base = true;
+    let mut uniform_mr = true;
     for y in 0..height {
         for x in 0..width {
             let diffuse_pixel = albedo
@@ -137,6 +159,15 @@ pub(super) fn bake_metallic_roughness(
             } else {
                 1.0
             };
+            let linear_base = [color[0], color[1], color[2], opacity as f32 / 255.0];
+            let mr = [metallic, rough];
+            if x == 0 && y == 0 {
+                first_base = linear_base;
+                first_mr = mr;
+            } else {
+                uniform_base &= first_base == linear_base;
+                uniform_mr &= first_mr == mr;
+            }
             base_color.put_pixel(
                 x,
                 y,
@@ -163,6 +194,8 @@ pub(super) fn bake_metallic_roughness(
     Ok(BakedPbr {
         base_color: encode(base_color)?,
         metallic_roughness: encode(metal_rough)?,
+        base_color_factor: uniform_base.then_some(first_base),
+        metallic_roughness_factors: uniform_mr.then_some(first_mr),
     })
 }
 

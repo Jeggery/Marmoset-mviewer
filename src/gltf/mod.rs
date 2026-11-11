@@ -17,7 +17,9 @@ use crate::archive::Archive;
 use crate::js_export::JsExportScene;
 use crate::mesh::{DecodedMesh, decode_mesh};
 use crate::scene::{Lights, MainCamera, MaterialDesc, Scene, ViewDesc};
-use textures::bake_metallic_roughness;
+use textures::{bake_metallic_roughness, is_neutral_normal};
+
+const SOURCE_TEXTURE_DIR: &str = "marmoset-source-texture";
 
 #[derive(Clone, Copy)]
 pub enum GltfOutputFormat {
@@ -117,7 +119,7 @@ pub fn export_scene_with_js_scene_progress(
 ) -> Result<()> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
-    if matches!(output_format, GltfOutputFormat::Gltf) {
+    if matches!(output_format, GltfOutputFormat::Gltf) && scene.materials.iter().any(material_has_textures) {
         progress(0, "Copying source textures");
         export_source_texture_files(archive, output_dir, progress)?;
     }
@@ -128,7 +130,7 @@ pub fn export_scene_with_js_scene_progress(
 
     let total_materials = scene.materials.len().max(1);
     for (material_idx, material) in scene.materials.iter().enumerate() {
-        let index = builder.add_material(archive, material, output_dir, &mut texture_cache)?;
+        let index = builder.add_material(archive, material, &mut texture_cache)?;
         material_lookup.insert(material.name.clone(), index);
         let p = 20 + ((material_idx + 1) * 35 / total_materials);
         progress(p as u8, "Exporting materials");
@@ -193,7 +195,6 @@ impl GltfBuilder {
         &mut self,
         archive: &Archive,
         material: &MaterialDesc,
-        output_dir: &Path,
         texture_cache: &mut HashMap<String, usize>,
     ) -> Result<usize> {
         let source = |name: Option<&str>| -> Result<Option<&[u8]>> {
@@ -210,15 +211,22 @@ impl GltfBuilder {
             material.ggx_specular.unwrap_or(false),
         ).with_context(|| format!("failed to convert material {}", material.name))?;
         let material_id = self.materials.len();
-        let base_color_texture = self.add_baked_texture(
-            format!("material_{material_id}_basecolor.png"), baked.base_color,
-        );
-        let metallic_roughness_texture = self.add_baked_texture(
-            format!("material_{material_id}_metalrough.png"), baked.metallic_roughness,
-        );
-        let normal_texture = material.normal_tex.as_deref().map(|name| {
-            self.ensure_texture_file(archive, name, output_dir, texture_cache)
-        }).transpose()?;
+        let base_color_factor = baked.base_color_factor;
+        let base_color_texture = if base_color_factor.is_none() {
+            Some(self.add_baked_texture(format!("material_{material_id}_basecolor.png"), baked.base_color))
+        } else { None };
+        let (metallic_factor, roughness_factor, metallic_roughness_texture) =
+            if let Some([metallic, roughness]) = baked.metallic_roughness_factors {
+                (metallic, roughness, None)
+            } else {
+                let texture = self.add_baked_texture(format!("material_{material_id}_metalrough.png"), baked.metallic_roughness);
+                (1.0, 1.0, Some(texture))
+            };
+        let normal_texture = match material.normal_tex.as_deref().filter(|name| !name.is_empty()) {
+            Some(name) if !is_neutral_normal(source(Some(name))?.unwrap()) =>
+                Some(self.ensure_texture_file(archive, name, texture_cache)?),
+            _ => None,
+        };
 
         let alpha_mode = match material.blend.as_deref() {
             Some("alpha") | Some("add") => Some("BLEND".to_string()),
@@ -236,16 +244,11 @@ impl GltfBuilder {
         self.materials.push(MaterialDef {
             name: Some(material.name.clone()),
             pbr_metallic_roughness: Some(PbrMetallicRoughness {
-                base_color_texture: Some(TextureRef {
-                    index: base_color_texture,
-                    tex_coord: None,
-                }),
-                metallic_factor: Some(1.0),
-                roughness_factor: Some(1.0),
-                metallic_roughness_texture: Some(TextureRef {
-                    index: metallic_roughness_texture,
-                    tex_coord: None,
-                }),
+                base_color_factor,
+                base_color_texture: base_color_texture.map(|index| TextureRef { index, tex_coord: None }),
+                metallic_factor: Some(metallic_factor),
+                roughness_factor: Some(roughness_factor),
+                metallic_roughness_texture: metallic_roughness_texture.map(|index| TextureRef { index, tex_coord: None }),
             }),
             normal_texture: normal_texture.map(|index| NormalTextureRef { index, scale: None }),
             emissive_factor: Some(if material.emissive_intensity.unwrap_or(0.0) > 0.0 {
@@ -267,6 +270,7 @@ impl GltfBuilder {
     }
 
     fn add_baked_texture(&mut self, name: String, data: Vec<u8>) -> usize {
+        let name = self.available_image_name(&name);
         let image_index = self.images.len();
         self.images.push(ImageDef {
             uri: Some(name.clone()), buffer_view: None, mime_type: None, name: Some(name.clone()),
@@ -279,11 +283,25 @@ impl GltfBuilder {
         texture_index
     }
 
+    fn available_image_name(&self, basename: &str) -> String {
+        let mut name = basename.to_string();
+        let mut suffix = 2;
+        while self.image_sources.iter().any(|image| image.name.eq_ignore_ascii_case(&name)) {
+            let path = Path::new(basename);
+            let stem = path.file_stem().and_then(|name| name.to_str()).unwrap_or("texture");
+            name = match path.extension().and_then(|ext| ext.to_str()) {
+                Some(ext) => format!("{stem}_{suffix}.{ext}"),
+                None => format!("{stem}_{suffix}"),
+            };
+            suffix += 1;
+        }
+        name
+    }
+
     fn ensure_texture_file(
         &mut self,
         archive: &Archive,
         name: &str,
-        output_dir: &Path,
         texture_cache: &mut HashMap<String, usize>,
     ) -> Result<usize> {
         if let Some(index) = texture_cache.get(name) {
@@ -293,28 +311,28 @@ impl GltfBuilder {
         let entry = archive
             .get(name)
             .with_context(|| format!("missing texture {}", name))?;
-        let output_path = output_dir.join(name);
-        if !output_path.exists() {
-            fs::write(&output_path, &entry.data)
-                .with_context(|| format!("failed to write {}", output_path.display()))?;
-        }
+        // Keep runtime dependencies beside the glTF for file drag-and-drop
+        // viewers. The untouched source archive is copied separately.
+        let relative = archive_relative_output_path(name);
+        let basename = relative.file_name().and_then(|name| name.to_str()).unwrap_or("texture.bin");
+        let export_name = self.available_image_name(basename);
 
         let image_index = self.images.len();
         self.images.push(ImageDef {
-            uri: Some(name.to_string()),
+            uri: Some(export_name.clone()),
             buffer_view: None,
             mime_type: None,
-            name: Some(name.to_string()),
+            name: Some(export_name.clone()),
         });
         self.image_sources.push(ImageSource {
-            name: name.to_string(),
+            name: export_name.clone(),
             mime_type: guess_mime_type(name).to_string(),
             data: entry.data.clone(),
         });
         let texture_index = self.textures.len();
         self.textures.push(TextureDef {
             source: image_index,
-            name: Some(name.to_string()),
+            name: Some(export_name.clone()),
         });
         texture_cache.insert(name.to_string(), texture_index);
         Ok(texture_index)
@@ -1283,6 +1301,13 @@ fn quaternion_from_direction(direction: [f32; 3]) -> [f32; 4] {
     ]))
 }
 
+fn material_has_textures(material: &MaterialDesc) -> bool {
+    !material.albedo_tex.is_empty() || [
+        &material.alpha_tex, &material.normal_tex, &material.reflectivity_tex,
+        &material.gloss_tex, &material.extras_tex, &material.extras_tex_a,
+    ].into_iter().any(|name| name.as_deref().is_some_and(|name| !name.is_empty()))
+}
+
 fn export_source_texture_files(
     archive: &Archive,
     output_dir: &Path,
@@ -1299,15 +1324,13 @@ fn export_source_texture_files(
             continue;
         }
         let relative_path = archive_relative_output_path(&entry.name);
-        let output_path = output_dir.join(&relative_path);
+        let output_path = output_dir.join(SOURCE_TEXTURE_DIR).join(&relative_path);
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        if !output_path.exists() {
-            fs::write(&output_path, &entry.data)
-                .with_context(|| format!("failed to write {}", output_path.display()))?;
-        }
+        fs::write(&output_path, &entry.data)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
         let p = ((index + 1) * 20 / total) as u8;
         progress(p, "Copying source textures");
     }
@@ -1612,6 +1635,8 @@ pub struct MaterialDef {
 
 #[derive(serde::Serialize)]
 pub struct PbrMetallicRoughness {
+    #[serde(rename = "baseColorFactor", skip_serializing_if = "Option::is_none")]
+    pub base_color_factor: Option<[f32; 4]>,
     #[serde(rename = "baseColorTexture", skip_serializing_if = "Option::is_none")]
     pub base_color_texture: Option<TextureRef>,
     #[serde(rename = "metallicFactor", skip_serializing_if = "Option::is_none")]

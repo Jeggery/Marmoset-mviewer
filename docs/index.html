@@ -3,18 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>mviewer | MView Viewer, Converter, and glTF/GLB Exporter</title>
+  <title>Marmoset-mviewer v3.0 | MView Viewer and glTF/GLB Exporter</title>
   <meta name="description" content="mviewer is a Rust-native MView viewer, converter, and exporter for Marmoset .mview scenes, with an embedded GUI preview, direct local or URL loading, plus glTF, GLB, and OBJ export.">
-  <meta property="og:title" content="mviewer | MView Viewer, Converter, and glTF/GLB Exporter">
+  <meta property="og:title" content="Marmoset-mviewer v3.0 | MView Viewer and glTF/GLB Exporter">
   <meta property="og:description" content="Convert Marmoset .mview scenes with an embedded GUI preview, open local files or supported URLs, and export to glTF, GLB, or OBJ.">
   <meta property="og:type" content="website">
+  <meta property="og:url" content="https://Jeggery.github.io/Marmoset-mviewer/">
+  <link rel="canonical" href="https://Jeggery.github.io/Marmoset-mviewer/">
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
   <main class="page">
     <section class="hero">
       <p><img src="images/marmoset_logo_red.png" alt="mviewer icon" style="width:72px;height:72px"></p>
-      <p class="eyebrow">mview viewer and exporter</p>
+      <p class="eyebrow">Marmoset-mviewer v3.0 · Jeggery fork</p>
       <h1>Convert Marmoset <code>.mview</code> scenes to glTF and GLB.</h1>
       <p class="lead">
         mviewer is a Rust-native <code>.mview</code> viewer, exporter, and converter for static
@@ -22,9 +24,10 @@
         mview viewer, mview editor, mview to gltf, mview to fbx, or mview to obj workflow.
       </p>
       <div class="actions">
-        <a class="button primary" href="https://github.com/majimboo/mviewer/releases/latest">Download latest release</a>
-        <a class="button" href="https://github.com/majimboo/mviewer">View on GitHub</a>
+        <a class="button primary" href="https://github.com/Jeggery/Marmoset-mviewer/releases/latest">Download latest release</a>
+        <a class="button" href="https://github.com/Jeggery/Marmoset-mviewer">View on GitHub</a>
       </div>
+      <p class="meta">Maintained by <a href="https://github.com/Jeggery">Jeggery</a> in <a href="https://github.com/Jeggery/Marmoset-mviewer">Jeggery/Marmoset-mviewer</a>, based on upstream v2.1.2.</p>
       <p class="meta">mviewer exports to glTF and GLB directly. If you need FBX, use the generated glTF as the intermediate format.</p>
     </section>
 
@@ -39,19 +42,22 @@
           <li>Static and animated <code>.gltf</code> scenes</li>
           <li>Single-file <code>.glb</code> export</li>
           <li>Meshes, skins, animation, cameras, and lights</li>
-          <li>Textures plus merged alpha / metallic-roughness maps</li>
+          <li>Converted Metallic/Roughness materials with constant-map optimization</li>
+          <li>glTF textures beside the model, with original images in a separate backup folder</li>
           <li>GUI export to OBJ/MTL for selected static meshes</li>
           <li>Desktop preview can open local files or supported URLs directly</li>
+          <li>Clear buttons, copyable model paths and bounded URL caches</li>
         </ul>
       </article>
       <article class="card">
         <h2>Install</h2>
         <ul>
-          <li>Windows 64-bit: <code>mviewer-vX.Y.Z-windows-x64.zip</code></li>
-          <li>Linux 64-bit: <code>mviewer-vX.Y.Z-linux-x64.tar.gz</code></li>
-          <li>macOS Apple Silicon: <code>mviewer-vX.Y.Z-macos-arm64.tar.gz</code></li>
-          <li>macOS Intel: <code>mviewer-vX.Y.Z-macos-x64.tar.gz</code></li>
-          <li>Extract it anywhere</li>
+          <li>Windows 64-bit: <code>mviewer-v3.0-windows-x64.exe</code> or <code>.zip</code></li>
+          <li>Linux 64-bit: <code>mviewer-v3.0-linux-x64.tar.gz</code></li>
+          <li>macOS Apple Silicon: <code>mviewer-v3.0-macos-arm64.tar.gz</code></li>
+          <li>macOS Intel: <code>mviewer-v3.0-macos-x64.tar.gz</code></li>
+          <li>Run the Windows EXE directly, or extract a platform archive</li>
+          <li>Windows GUI preview requires WebView2 Runtime</li>
           <li>Run <code>mviewer --help</code> to verify the install</li>
         </ul>
       </article>

@@ -1,5 +1,51 @@
 # Changelog
 
+## 3.0.0 - 2026-11-11
+
+First major release of [Jeggery/Marmoset-mviewer](https://github.com/Jeggery/Marmoset-mviewer),
+based on upstream v2.1.2.
+
+### Desktop workflow
+
+- Added a toolbar clear button to unload the current scene and clear its path.
+- Added independent clear buttons for the local-file and URL source inputs.
+- Made the current model path selectable and copyable, with the filename visible
+  when a newly loaded path is wider than the field.
+- Gave this fork its own settings, WebView and cache namespace; older application
+  settings and caches are not migrated.
+
+### URL loading
+
+- Store URL models in application-managed caches instead of creating numbered
+  downloads in the user's Downloads folder.
+- Use readable model-name directories with short URL hashes and collision checks.
+- Revalidate cached models using ETag/Last-Modified, validate downloads before
+  replacement, and prune older entries above 32 models or 512 MiB while protecting
+  active models. Individual downloads are limited to 512 MiB.
+
+### glTF and GLB export
+
+- Reconstruct core Metallic/Roughness materials from Marmoset diffuse, RGB
+  reflectivity and gloss maps, including metal base colors and color-space handling.
+- Convert legacy Blinn-Phong gloss approximately to GGX roughness and export
+  authored tangent frames for more consistent normal mapping.
+- Export constant color, metallic and roughness maps as numeric material factors;
+  omit neutral 1x1 normal maps.
+- Write a single self-contained file for GLB, with no external texture files.
+- Put all glTF image dependencies beside the glTF and keep untouched archive
+  images in `marmoset-source-texture/`; resolve flattened filename conflicts.
+- Correct embedded-image bufferView usage and add export/material/cache regression
+  coverage.
+
+### Distribution and remaining limits
+
+- Publish from this fork with version/tag validation and a standalone Windows x64
+  EXE alongside platform archives. Fix missing macOS icon sizes.
+- Core metal/rough conversion remains approximate for Marmoset-specific additive
+  glass, Fresnel behavior, lighting and post-processing.
+- Existing animated exports can still contain invalid empty `children` arrays;
+  that separate animation issue is not fixed in this release.
+
 ## 2.1.2 - 2026-04-03
 
 - added visible progress/loading feedback for URL-based scene loading in the desktop app

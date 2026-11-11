@@ -5,6 +5,16 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag matching Cargo.toml (e.g. v3.0)"
+        required: true
+        default: "v3.0"
+        type: string
+
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -14,8 +24,35 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Validate tag, package version and release notes
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          python3 scripts/release_metadata.py --tag "$RELEASE_TAG"
+          git show-ref --verify "refs/tags/$RELEASE_TAG"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Test release metadata validation
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
   build:
     name: Release build (${{ matrix.label }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,23 +60,25 @@ jobs:
         include:
           - os: ubuntu-latest
             label: linux-x64
-            archive_name: mviewer-${{ github.ref_name }}-linux-x64.tar.gz
+            archive_name: mviewer-${{ needs.prepare.outputs.tag }}-linux-x64.tar.gz
             bin_name: mviewer
           - os: windows-latest
             label: windows-x64
-            archive_name: mviewer-${{ github.ref_name }}-windows-x64.zip
+            archive_name: mviewer-${{ needs.prepare.outputs.tag }}-windows-x64.zip
             bin_name: mviewer.exe
           - os: macos-latest
             label: macos-arm64
-            archive_name: mviewer-${{ github.ref_name }}-macos-arm64.tar.gz
+            archive_name: mviewer-${{ needs.prepare.outputs.tag }}-macos-arm64.tar.gz
             bin_name: mviewer
           - os: macos-15-intel
             label: macos-x64
-            archive_name: mviewer-${{ github.ref_name }}-macos-x64.tar.gz
+            archive_name: mviewer-${{ needs.prepare.outputs.tag }}-macos-x64.tar.gz
             bin_name: mviewer
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -60,14 +99,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Test
+        run: cargo test --release --locked --lib
+
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Prepare package directory
         shell: bash
         run: |
           mkdir -p dist/mviewer
           cp README.md dist/mviewer/README.md
+          cp CHANGELOG.md dist/mviewer/CHANGELOG.md
           cp LICENSE 2>/dev/null dist/mviewer/LICENSE || true
           cp target/release/${{ matrix.bin_name }} dist/mviewer/${{ matrix.bin_name }}
           mkdir -p dist/mviewer/icons
@@ -100,7 +143,7 @@ jobs:
             <key>CFBundleIconFile</key>
             <string>AppIcon</string>
             <key>CFBundleIdentifier</key>
-            <string>io.github.majimboo.mviewer</string>
+            <string>io.github.jeggery.marmoset-mviewer</string>
             <key>CFBundleInfoDictionaryVersion</key>
             <string>6.0</string>
             <key>CFBundleName</key>
@@ -108,7 +151,7 @@ jobs:
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleShortVersionString</key>
-            <string>${{ github.ref_name }}</string>
+            <string>${{ needs.prepare.outputs.version }}</string>
             <key>CFBundleVersion</key>
             <string>${{ github.run_number }}</string>
             <key>LSMinimumSystemVersion</key>
@@ -116,7 +159,7 @@ jobs:
           </dict>
           </plist>
           mkdir -p icon.iconset
-          for size in 16 32 64 128 256 512; do
+          for size in 16 32 128 256 512; do
             cp "target/generated-icons/mviewer-${size}.png" "icon.iconset/icon_${size}x${size}.png"
             cp "target/generated-icons/mviewer-$((size * 2)).png" "icon.iconset/icon_${size}x${size}@2x.png"
           done
@@ -141,17 +184,39 @@ jobs:
           name: ${{ matrix.label }}
           path: dist/${{ matrix.archive_name }}
 
+      - name: Prepare standalone Windows executable
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: Copy-Item -LiteralPath target\release\mviewer.exe -Destination "dist\mviewer-${env:RELEASE_TAG}-windows-x64.exe"
+
+      - name: Upload standalone Windows executable
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-x64-exe
+          path: dist/mviewer-${{ needs.prepare.outputs.tag }}-windows-x64.exe
+
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Prepare release notes
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: python3 scripts/release_metadata.py --tag "$RELEASE_TAG" --notes-file release-notes.md
 
       - name: Download artifacts with GitHub CLI
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p release-artifacts
           gh run download ${{ github.run_id }} --dir release-artifacts
@@ -159,10 +224,12 @@ jobs:
       - name: Publish release assets with GitHub CLI
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         shell: bash
         run: |
-          if ! gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
-            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --generate-notes
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "Marmoset-mviewer $RELEASE_TAG" --notes-file release-notes.md
           fi
-          gh release edit "${{ github.ref_name }}" --draft=false
-          find release-artifacts -type f -print0 | xargs -0 gh release upload "${{ github.ref_name }}" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --notes-file release-notes.md
+          find release-artifacts -type f -print0 | xargs -0 gh release upload "$RELEASE_TAG" --clobber

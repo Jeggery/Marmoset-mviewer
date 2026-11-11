@@ -13,7 +13,7 @@ enum CliFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "mviewer")]
+#[command(name = "mviewer", version)]
 #[command(about = "Export Marmoset .mview scenes to glTF or GLB")]
 struct Cli {
     #[arg(value_name = "INPUT")]

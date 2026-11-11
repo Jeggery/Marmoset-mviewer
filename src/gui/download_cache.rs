@@ -21,10 +21,62 @@ struct Metadata {
     accessed_at: u64,
 }
 
-// Cache keys include the complete resource URL (including query parameters),
-// while fragments are omitted because they are not sent to the server.
+fn url_hash(url: &reqwest::Url) -> String {
+    format!("{:x}", Sha256::digest(url.as_str().as_bytes()))
+}
+
+fn readable_entry_path(root: &Path, url: &reqwest::Url, hash_length: usize) -> PathBuf {
+    let name = model_name(url);
+    let stem = name.strip_suffix(".mview").unwrap_or("scene");
+    let stem = &stem[..stem.len().min(32)];
+    root.join(format!("{stem}-{}", &url_hash(url)[..hash_length]))
+}
+
 fn entry_path(root: &Path, url: &reqwest::Url) -> PathBuf {
-    root.join(format!("{:x}", Sha256::digest(url.as_str().as_bytes())))
+    readable_entry_path(root, url, 8)
+}
+
+fn read_metadata(directory: &Path) -> Option<Metadata> {
+    serde_json::from_slice(&fs::read(directory.join("cache.json")).ok()?).ok()
+}
+
+fn owns_entry(root: &Path, directory: &Path, url: &reqwest::Url) -> bool {
+    (8..=64)
+        .step_by(4)
+        .any(|length| directory == readable_entry_path(root, url, length))
+}
+
+fn prepare_entry(root: &Path, url: &reqwest::Url) -> Result<PathBuf> {
+    // A short hash is readable. On collision, extend it instead of overwriting
+    // a different URL's model (or any directory without matching ownership).
+    let mut selected = None;
+    for length in (8..=64).step_by(4) {
+        let candidate = if length == 8 {
+            entry_path(root, url)
+        } else {
+            readable_entry_path(root, url, length)
+        };
+        match fs::symlink_metadata(&candidate) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                selected = Some(candidate);
+                break;
+            }
+            Err(err) => return Err(err.into()),
+            Ok(info) if info.is_dir() && !info.file_type().is_symlink() => {
+                let matching =
+                    read_metadata(&candidate).is_some_and(|meta| meta.source_url == url.as_str());
+                if matching || fs::read_dir(&candidate)?.next().is_none() {
+                    selected = Some(candidate);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let entry = selected.context("could not allocate a unique model cache directory")?;
+    fs::create_dir_all(&entry).context("failed to create model cache directory")?;
+
+    Ok(entry)
 }
 
 fn model_name(url: &reqwest::Url) -> String {
@@ -78,8 +130,7 @@ pub(super) fn load(
 ) -> Result<PathBuf> {
     let mut url = url.clone();
     url.set_fragment(None);
-    let entry = entry_path(root, &url);
-    fs::create_dir_all(&entry).context("failed to create model cache directory")?;
+    let entry = prepare_entry(root, &url)?;
     let model = entry.join(model_name(&url));
     let metadata_path = entry.join("cache.json");
     let previous = fs::read(&metadata_path)
@@ -177,15 +228,9 @@ fn prune(
     let mut entries = Vec::new();
     for item in fs::read_dir(root)? {
         let item = item?;
-        let name = item.file_name();
-        let name = name.to_string_lossy();
-        // Only consider cache-owned hash directories, never links or other data.
+        // Only consider owned readable directories, never links.
         let kind = item.file_type()?;
-        if kind.is_symlink()
-            || !kind.is_dir()
-            || name.len() != 64
-            || !name.bytes().all(|c| c.is_ascii_hexdigit())
-        {
+        if kind.is_symlink() || !kind.is_dir() {
             continue;
         }
         let directory = item.path();
@@ -199,7 +244,7 @@ fn prune(
         let Ok(url) = reqwest::Url::parse(&meta.source_url) else {
             continue;
         };
-        if entry_path(root, &url) != directory || meta.file_name != model_name(&url) {
+        if !owns_entry(root, &directory, &url) || meta.file_name != model_name(&url) {
             continue;
         }
         let model = directory.join(&meta.file_name);
@@ -322,10 +367,72 @@ mod tests {
         let b = reqwest::Url::parse("https://example.com/lens.mview?id=2").unwrap();
         assert_ne!(entry_path(root, &a), entry_path(root, &b));
         assert_eq!(model_name(&a), "lens.mview");
+        let directory = entry_path(root, &a);
+        let directory = directory.file_name().unwrap().to_str().unwrap();
+        assert!(directory.starts_with("lens-"));
+        assert_eq!(directory.len(), "lens-".len() + 8);
         assert_eq!(
             model_name(&reqwest::Url::parse("https://example.com/CON.mview").unwrap()),
             "_CON.mview"
         );
+    }
+
+    #[test]
+    fn short_hash_collision_extends_key_without_overwriting_other_source() {
+        let root = tempfile::tempdir().unwrap();
+        let a = reqwest::Url::parse("https://example.com/lens.mview?id=a").unwrap();
+        let b = reqwest::Url::parse("https://example.com/lens.mview?id=b").unwrap();
+        let occupied = entry_path(root.path(), &a);
+        fs::create_dir_all(&occupied).unwrap();
+        let meta = Metadata {
+            source_url: b.to_string(),
+            file_name: model_name(&b),
+            etag: None,
+            last_modified: None,
+            accessed_at: 0,
+        };
+        fs::write(
+            occupied.join("cache.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        fs::write(occupied.join("lens.mview"), b"other source").unwrap();
+        let selected = prepare_entry(root.path(), &a).unwrap();
+        assert_eq!(selected, readable_entry_path(root.path(), &a, 12));
+        assert_eq!(prepare_entry(root.path(), &a).unwrap(), selected);
+        assert_eq!(
+            fs::read(occupied.join("lens.mview")).unwrap(),
+            b"other source"
+        );
+    }
+
+    #[test]
+    fn old_full_hash_cache_is_ignored_and_left_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let url = reqwest::Url::parse("https://example.com/lens.mview").unwrap();
+        let old_directory = root.path().join(url_hash(&url));
+        fs::create_dir_all(&old_directory).unwrap();
+        let old_model = old_directory.join("lens.mview");
+        fs::write(&old_model, b"old model").unwrap();
+        let meta = Metadata {
+            source_url: url.to_string(),
+            file_name: model_name(&url),
+            etag: None,
+            last_modified: None,
+            accessed_at: 0,
+        };
+        fs::write(
+            old_directory.join("cache.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        let selected = prepare_entry(root.path(), &url).unwrap();
+        assert_eq!(selected, entry_path(root.path(), &url));
+        assert!(!selected.join("lens.mview").exists());
+        assert!(!selected.join("cache.json").exists());
+        prune(root.path(), &[], 0, 0).unwrap();
+        assert_eq!(fs::read(old_model).unwrap(), b"old model");
+        assert!(old_directory.join("cache.json").exists());
     }
 
     fn seed(root: &Path, index: u64) -> PathBuf {

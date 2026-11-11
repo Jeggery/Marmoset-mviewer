@@ -25,7 +25,7 @@ fn generate_shared_icon_assets() -> Result<(), Box<dyn std::error::Error>> {
     let output_dir = target_dir.join("generated-icons");
     fs::create_dir_all(&output_dir)?;
 
-    for size in [64_u32, 128, 256, 512, 1024] {
+    for size in [16_u32, 32, 64, 128, 256, 512, 1024] {
         let resized = image::imageops::resize(
             &image,
             size,
@@ -63,6 +63,8 @@ fn embed_windows_icon() -> Result<(), Box<dyn std::error::Error>> {
     icon_dir.write(&mut file)?;
 
     winresource::WindowsResource::new()
+        .set("ProductName", "Marmoset-mviewer")
+        .set("FileDescription", "Marmoset .mview viewer and exporter - Jeggery fork")
         .set_icon(icon_path.to_string_lossy().as_ref())
         .compile()?;
 

@@ -40,9 +40,9 @@ const APP_HTML: &str = r#"<!doctype html>
 <body>
   <div class="toolbar">
     <div class="toolbar-row">
-      <div class="brand" aria-label="mviewer by github.com/majimboo">
+      <div class="brand" aria-label="mviewer, Jeggery fork">
         <div class="brand-title">mviewer</div>
-        <div class="brand-subtitle">github.com/majimboo</div>
+        <div class="brand-subtitle">github.com/Jeggery</div>
       </div>
       <div class="path">
         <input class="path-text" id="inputPath" type="text" readonly aria-label="Current model path" placeholder="Open a .mview file" spellcheck="false" />
@@ -83,7 +83,7 @@ const APP_HTML: &str = r#"<!doctype html>
           <div class="preview-loading hidden" id="previewLoading">
             <div class="preview-loading-brand">
               <div class="preview-loading-title">mviewer</div>
-              <div class="preview-loading-subtitle">github.com/majimboo</div>
+              <div class="preview-loading-subtitle">github.com/Jeggery</div>
               <div class="preview-loading-message" id="previewLoadingMessage">Loading preview…</div>
             </div>
           </div>
@@ -532,7 +532,10 @@ const APP_HTML: &str = r#"<!doctype html>
       latestState = state;
       const pathInput = document.getElementById('inputPath');
       const inputPath = state.input_path || '';
-      if (pathInput.value !== inputPath) pathInput.value = inputPath;
+      if (pathInput.value !== inputPath) {
+        pathInput.value = inputPath;
+        pathInput.scrollLeft = pathInput.scrollWidth;
+      }
       pathInput.title = inputPath;
       document.getElementById('clearSceneButton').disabled = !state.loaded || !!state.loading_scene || !!state.exporting;
       document.getElementById('localPathInput').value = state.local_path_draft || '';
@@ -1271,9 +1274,14 @@ fn remember_export_defaults(state: &mut AppState, export_options: &GuiExportOpti
     persist_settings(state);
 }
 
+fn project_dirs() -> Result<ProjectDirs> {
+    // Use the fork's own namespace for settings, WebView storage and caches.
+    ProjectDirs::from("io.github", "jeggery", "marmoset-mviewer")
+        .context("failed to resolve app data directories")
+}
+
 fn app_paths() -> Result<AppPaths> {
-    let dirs = ProjectDirs::from("com", "majidarif", "mviewer")
-        .context("failed to resolve app data directories")?;
+    let dirs = project_dirs()?;
     let config_dir = dirs.config_dir();
     let data_local_dir = dirs.data_local_dir();
     std::fs::create_dir_all(config_dir).context("failed to create config directory")?;
@@ -1556,8 +1564,7 @@ fn download_scene_from_url(page_or_file_url: &str, current_scene: Option<&Path>)
         .build()
         .context("failed to create HTTP client")?;
     let scene_url = resolve_mview_url(&client, page_or_file_url)?;
-    let dirs = ProjectDirs::from("com", "majidarif", "mviewer")
-        .context("failed to resolve scene cache directory")?;
+    let dirs = project_dirs()?;
     super::download_cache::load(&client, &scene_url, &dirs.cache_dir().join("scenes"), current_scene)
 }
 

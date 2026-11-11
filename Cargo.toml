@@ -1,7 +1,11 @@
 [package]
 name = "mviewer"
-version = "2.1.2"
+version = "3.0.0"
 edition = "2024"
+description = "Marmoset .mview viewer and glTF/GLB exporter, maintained by the Jeggery fork"
+repository = "https://github.com/Jeggery/Marmoset-mviewer"
+homepage = "https://Jeggery.github.io/Marmoset-mviewer/"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0"
