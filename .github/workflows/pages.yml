@@ -1,42 +1,70 @@
-name: Pages
+name: GitHub Pages
 
 on:
   push:
     branches:
       - master
+    paths:
+      - 'docs/**'
+      - 'scripts/prepare_pages.py'
+      - '.github/workflows/pages.yml'
+      - 'Cargo.toml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'scripts/prepare_pages.py'
+      - '.github/workflows/pages.yml'
+      - 'Cargo.toml'
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: pages-${{ github.event.pull_request.number || 'production' }}
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
+    name: Validate and prepare static site
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate links and prepare public files
+        run: python scripts/prepare_pages.py --output dist/pages
+
       - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/upload-pages-artifact@v4
         with:
-          path: docs
+          path: dist/pages
 
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: build
     steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
