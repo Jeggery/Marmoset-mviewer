@@ -7,12 +7,14 @@ on:
     paths:
       - 'docs/**'
       - 'scripts/prepare_pages.py'
+      - 'scripts/test_prepare_pages.py'
       - '.github/workflows/pages.yml'
       - 'Cargo.toml'
   pull_request:
     paths:
       - 'docs/**'
       - 'scripts/prepare_pages.py'
+      - 'scripts/test_prepare_pages.py'
       - '.github/workflows/pages.yml'
       - 'Cargo.toml'
   workflow_dispatch:
@@ -40,6 +42,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
+      - name: Test Pages preparation
+        run: python -m unittest discover -s scripts -p 'test_prepare_pages.py'
 
       - name: Validate links and prepare public files
         run: python scripts/prepare_pages.py --output dist/pages

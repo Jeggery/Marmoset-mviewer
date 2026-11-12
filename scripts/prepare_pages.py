@@ -3,6 +3,7 @@
 import argparse
 from html.parser import HTMLParser
 from pathlib import Path
+import posixpath
 import shutil
 import tomllib
 from urllib.parse import unquote, urlsplit
@@ -46,6 +47,11 @@ def prepare(root: Path, output: Path | None) -> None:
         path = unquote(urlsplit(url).path)
         if not path:
             continue
+        # URL paths use POSIX separators on every build platform. A relative
+        # directory-root link resolves to the published index document.
+        path = posixpath.normpath(path)
+        if path == '.':
+            path = 'index.html'
         if path not in published:
             raise ValueError(f'Local URL is missing or not relative to the project site: {url}')
     if output is not None:
