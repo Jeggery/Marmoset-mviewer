@@ -14,9 +14,6 @@ PBR export fixes. See [CHANGELOG.md](CHANGELOG.md).
 Project preview: [Jeggery.github.io/Marmoset-mviewer](https://Jeggery.github.io/Marmoset-mviewer/)
 (available after GitHub Pages deployment).
 
-For website setup, local preview and v3.0 publishing steps, see
-[PUBLISHING.md](PUBLISHING.md).
-
 The application/package version is `3.0.0`; the release tag for this milestone is
 `v3.0` (`v3.0.0` is also accepted by the release workflow).
 
