@@ -150,9 +150,6 @@ On Windows, model caches are stored under:
   Marmoset runtime. Other viewers render the converted standard glTF materials;
   additive glass, Fresnel controls, environment lighting, and post-processing
   are not reproduced exactly.
-- **Animation parity is incomplete.** Some animated exports can contain empty
-  `children` arrays that fail strict glTF validation. The static lens example
-  does not verify animated-scene compatibility.
 - **FBX requires another tool.** Direct FBX export is not implemented.
 - **OBJ is static.** Use glTF/GLB when you need skins or animation.
 

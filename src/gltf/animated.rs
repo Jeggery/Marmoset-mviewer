@@ -90,7 +90,8 @@ pub fn export_animated_scene(
             translation: Some(translation),
             rotation: Some(rotation),
             scale: Some(scale),
-            children: Some(Vec::new()),
+            // append_child creates the array only for parents; glTF forbids empty arrays.
+            children: None,
             camera: None,
             extensions: None,
             extras: Some(build_object_extras(
@@ -156,6 +157,7 @@ pub fn export_animated_scene(
                     primary_animation,
                     &object_to_node,
                     mapped_object_index.expect("mapped mesh object required for skin"),
+                    animations.scene_scale,
                 )
             })
             .transpose()?;
@@ -189,7 +191,11 @@ pub fn export_animated_scene(
             })),
         });
 
-        if let Some(object_index) = mapped_object_index {
+        if skin_binding.is_some() {
+            // Skin matrices already include the mesh object's world transform.
+            // Keep the skinned mesh at the scene root for portable glTF playback.
+            scene_roots.push(render_node_index);
+        } else if let Some(object_index) = mapped_object_index {
             builder.append_child(object_to_node[&object_index], render_node_index);
         } else {
             scene_roots.push(render_node_index);
@@ -692,10 +698,12 @@ struct RenderNodeBinding {
     skin_binding: Option<MeshSkinBinding>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MeshSkinData {
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
+    pub extra_joints: Option<Vec<[u16; 4]>>,
+    pub extra_weights: Option<Vec<[f32; 4]>>,
 }
 
 struct MeshSkinBinding {
@@ -803,7 +811,7 @@ fn build_animation_clip(
             };
 
             let sample_times = collect_object_sample_times(animation, object_index);
-            if sample_times.len() <= 1 {
+            if sample_times.is_empty() {
                 continue;
             }
 
@@ -818,7 +826,9 @@ fn build_animation_clip(
                 scales.push(scale);
             }
 
-            if has_nontrivial_vec3_animation(&translations) {
+            // Keep constant components too: a different clip can animate them,
+            // and switching back must restore this clip's authored pose.
+            {
                 let sampler_index = samplers.len();
                 samplers.push(AnimationSamplerDef {
                     input: builder.push_runtime_scalar_f32(&sample_times),
@@ -834,7 +844,7 @@ fn build_animation_clip(
                 });
             }
 
-            if has_nontrivial_quat_animation(&rotations) {
+            {
                 let sampler_index = samplers.len();
                 samplers.push(AnimationSamplerDef {
                     input: builder.push_runtime_scalar_f32(&sample_times),
@@ -850,7 +860,7 @@ fn build_animation_clip(
                 });
             }
 
-            if has_nontrivial_vec3_animation(&scales) {
+            {
                 let sampler_index = samplers.len();
                 samplers.push(AnimationSamplerDef {
                     input: builder.push_runtime_scalar_f32(&sample_times),
@@ -888,6 +898,7 @@ fn build_animation_clip(
                     animation,
                     cluster_binding,
                     seconds,
+                    scene_scale,
                 );
                 let (translation, rotation, scale) = decompose_matrix_trs(matrix);
                 translations.push(translation);
@@ -895,7 +906,7 @@ fn build_animation_clip(
                 scales.push(scale);
             }
 
-            if has_nontrivial_vec3_animation(&translations) {
+            {
                 let sampler_index = samplers.len();
                 samplers.push(AnimationSamplerDef {
                     input: builder.push_runtime_scalar_f32(&sample_times),
@@ -911,7 +922,7 @@ fn build_animation_clip(
                 });
             }
 
-            if has_nontrivial_quat_animation(&rotations) {
+            {
                 let sampler_index = samplers.len();
                 samplers.push(AnimationSamplerDef {
                     input: builder.push_runtime_scalar_f32(&sample_times),
@@ -927,7 +938,7 @@ fn build_animation_clip(
                 });
             }
 
-            if has_nontrivial_vec3_animation(&scales) {
+            {
                 let sampler_index = samplers.len();
                 samplers.push(AnimationSamplerDef {
                     input: builder.push_runtime_scalar_f32(&sample_times),
@@ -978,7 +989,15 @@ fn collect_object_sample_times(animation: &ParsedAnimation, object_index: usize)
         animation.desc.original_fps
     };
     let mut frame_times = BTreeSet::new();
+    // Original curves need evaluation between their authored keys as well.
+    // Sample each source frame, including clip boundaries.
+    for frame in 0..=animation.desc.total_frames {
+        frame_times.insert((frame * 1000) as i32);
+    }
     collect_related_frames(animation, object_index, &mut frame_times, 0);
+    // Custom clips may reuse a longer model-part animation. Do not extend the
+    // exported clip to the last key of that shared source track.
+    frame_times.retain(|frame| *frame >= 0 && *frame <= (animation.desc.total_frames * 1000) as i32);
     frame_times
         .into_iter()
         .map(|time| (time as f32 / 1000.0) / safe_fps)
@@ -1030,18 +1049,24 @@ fn compute_local_matrix(
     animation: &ParsedAnimation,
     object_index: usize,
     seconds: f32,
-    _scene_scale: f32,
+    scene_scale: f32,
     _object_to_node: &HashMap<usize, usize>,
 ) -> [f32; 16] {
     let object = &animation.animated_objects[object_index];
     let frame_percent = animation.get_object_animation_frame_percent(object_index, seconds);
     let local = object.evaluate_local_transform_at_frame_percent(frame_percent, true);
-    if object.desc.model_part_index != object_index {
+    let mut local = if object.desc.model_part_index != object_index {
         let animated_local = animation.get_animated_local_transform(object_index, seconds);
         mul_matrix4(&animated_local, &local)
     } else {
         local
+    };
+    // Runtime sceneScale affects world translations, not the linear basis.
+    // Scaling every local translation produces the same composed world result.
+    for value in &mut local[12..15] {
+        *value *= scene_scale;
     }
+    local
 }
 
 fn build_animation_channels_from_samples(
@@ -1084,7 +1109,7 @@ fn build_animation_channels_from_samples(
             continue;
         }
 
-        if has_nontrivial_vec3_animation(&translations) {
+        {
             let sampler_index = samplers.len();
             samplers.push(AnimationSamplerDef {
                 input: builder.push_runtime_scalar_f32(&sample_times),
@@ -1098,10 +1123,9 @@ fn build_animation_channels_from_samples(
                     path: "translation".to_string(),
                 },
             });
-            added_any = true;
         }
 
-        if has_nontrivial_quat_animation(&rotations) {
+        {
             let sampler_index = samplers.len();
             samplers.push(AnimationSamplerDef {
                 input: builder.push_runtime_scalar_f32(&sample_times),
@@ -1115,10 +1139,9 @@ fn build_animation_channels_from_samples(
                     path: "rotation".to_string(),
                 },
             });
-            added_any = true;
         }
 
-        if has_nontrivial_vec3_animation(&scales) {
+        {
             let sampler_index = samplers.len();
             samplers.push(AnimationSamplerDef {
                 input: builder.push_runtime_scalar_f32(&sample_times),
@@ -1182,6 +1205,7 @@ fn sample_cluster_matrix(
     animation: &ParsedAnimation,
     cluster_binding: &ClusterJointBinding,
     seconds: f32,
+    scene_scale: f32,
 ) -> [f32; 16] {
     let mesh_model_part = &animation.animated_objects[cluster_binding.mesh_model_part_index];
     let frame_blend = (seconds * mesh_model_part.desc.model_part_fps).fract();
@@ -1192,7 +1216,16 @@ fn sample_cluster_matrix(
 
     let matrix0 = solve_cluster_matrix_at_frame(animation, cluster_binding, frame0);
     let matrix1 = solve_cluster_matrix_at_frame(animation, cluster_binding, frame1);
-    lerp_matrix4(&matrix0, &matrix1, frame_blend)
+    let mut matrix = lerp_matrix4(&matrix0, &matrix1, frame_blend);
+    // Marmoset scales the entire deformed position, including the cluster
+    // translation, before applying the mesh display matrix (S * cluster).
+    let scale = animation.animated_objects[cluster_binding.mesh_object_index].desc.model_part_scale * scene_scale;
+    for column in 0..4 {
+        for row in 0..3 {
+            matrix[column * 4 + row] *= scale;
+        }
+    }
+    matrix
 }
 
 fn solve_cluster_matrix_at_frame(
@@ -1234,25 +1267,6 @@ fn solve_cluster_matrix_at_frame(
     }
 }
 
-fn has_nontrivial_vec3_animation(values: &[[f32; 3]]) -> bool {
-    values.windows(2).any(|window| !approx_eq3(window[0], window[1]))
-}
-
-fn has_nontrivial_quat_animation(values: &[[f32; 4]]) -> bool {
-    values.windows(2).any(|window| !approx_eq4(window[0], window[1]))
-}
-
-fn approx_eq3(a: [f32; 3], b: [f32; 3]) -> bool {
-    (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5 && (a[2] - b[2]).abs() < 1e-5
-}
-
-fn approx_eq4(a: [f32; 4], b: [f32; 4]) -> bool {
-    (a[0] - b[0]).abs() < 1e-5
-        && (a[1] - b[1]).abs() < 1e-5
-        && (a[2] - b[2]).abs() < 1e-5
-        && (a[3] - b[3]).abs() < 1e-5
-}
-
 fn build_skin_binding(
     builder: &mut GltfBuilder,
     rig: &crate::animation::SkinningRig,
@@ -1260,9 +1274,13 @@ fn build_skin_binding(
     animation: &ParsedAnimation,
     object_to_node: &HashMap<usize, usize>,
     mesh_object_index: usize,
+    scene_scale: f32,
 ) -> Result<MeshSkinBinding> {
     let mut joints = vec![[0u16; 4]; vertex_count];
     let mut weights = vec![[0.0f32; 4]; vertex_count];
+    let mut extra_joints = vec![[0u16; 4]; vertex_count];
+    let mut extra_weights = vec![[0.0f32; 4]; vertex_count];
+    let mut needs_extra_weights = false;
 
     let mesh_object = animation
         .find_object(mesh_object_index)
@@ -1284,7 +1302,8 @@ fn build_skin_binding(
             name: Some(format!("cluster_joint_{}_{}", mesh_object.desc.part_name, cluster_index)),
             mesh: None,
             skin: None,
-            matrix: Some(identity_matrix()),
+            // Cluster joints receive TRS animation channels, so matrix must be absent.
+            matrix: None,
             translation: None,
             rotation: None,
             scale: None,
@@ -1298,7 +1317,7 @@ fn build_skin_binding(
         joint_nodes.push(joint_node);
         joint_object_indices.push(cluster.link_object_index as usize);
         inverse_bind_matrices.push(identity_matrix());
-        cluster_bindings.push(ClusterJointBinding {
+        let binding = ClusterJointBinding {
             node_index: joint_node,
             mesh_object_index,
             mesh_model_part_index: mesh_object.desc.model_part_index,
@@ -1308,7 +1327,15 @@ fn build_skin_binding(
             default_cluster_world_transform: cluster.default_cluster_world_transform,
             default_cluster_base_transform: cluster.default_cluster_base_transform,
             default_associate_world_transform: cluster.default_associate_world_transform,
-        });
+        };
+        // A glTF viewer can display the file before starting any animation.
+        // Never leave the initial skin at identity (the undeformed bind pose).
+        let initial = sample_cluster_matrix(animation, &binding, 0.0, scene_scale);
+        let (translation, rotation, scale) = decompose_matrix_trs(initial);
+        builder.nodes[joint_node].translation = Some(translation);
+        builder.nodes[joint_node].rotation = Some(rotation);
+        builder.nodes[joint_node].scale = Some(scale);
+        cluster_bindings.push(binding);
     }
     if joint_nodes.is_empty() {
         anyhow::bail!("skinning rig produced no usable joint nodes");
@@ -1338,7 +1365,9 @@ fn build_skin_binding(
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let retained = influences.len().min(4);
+        anyhow::ensure!(influences.len() <= 8,
+            "vertex {vertex_index} has more than eight skin influences; refusing to discard weights");
+        let retained = influences.len();
         let total_weight = influences
             .iter()
             .take(retained)
@@ -1346,17 +1375,28 @@ fn build_skin_binding(
             .sum::<f32>();
 
         for (slot, (joint_index, weight)) in influences.into_iter().take(retained).enumerate() {
-            joints[vertex_index][slot] = joint_index;
-            weights[vertex_index][slot] = if total_weight > 0.0 {
+            let normalized = if total_weight > 0.0 {
                 weight / total_weight
             } else {
                 0.0
             };
+            if slot < 4 {
+                joints[vertex_index][slot] = joint_index;
+                weights[vertex_index][slot] = normalized;
+            } else {
+                needs_extra_weights = true;
+                extra_joints[vertex_index][slot - 4] = joint_index;
+                extra_weights[vertex_index][slot - 4] = normalized;
+            }
         }
     }
 
     Ok(MeshSkinBinding {
-        skin_data: MeshSkinData { joints, weights },
+        skin_data: MeshSkinData {
+            joints, weights,
+            extra_joints: needs_extra_weights.then_some(extra_joints),
+            extra_weights: needs_extra_weights.then_some(extra_weights),
+        },
         joint_nodes,
         inverse_bind_matrices,
         skeleton_root: object_to_node.get(&mesh_object_index).copied(),

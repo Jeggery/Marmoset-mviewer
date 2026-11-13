@@ -17,6 +17,67 @@ pub struct DecodedMesh {
     pub indices: Vec<u32>,
 }
 
+// Read just the UVs needed by the material preflight, without decoding/copying
+// positions, tangent frames, or skin streams for every mesh a second time.
+pub(crate) fn triangle_uvs(
+    bytes: &[u8],
+    mesh: &MeshDesc,
+    first_index: usize,
+    secondary: bool,
+) -> Result<[[f32; 2]; 3]> {
+    anyhow::ensure!(
+        first_index
+            .checked_add(2)
+            .is_some_and(|end| end < mesh.index_count),
+        "triangle index out of range"
+    );
+    anyhow::ensure!(
+        !secondary || mesh.secondary_tex_coord.unwrap_or(0) > 0,
+        "emissive atlas requires secondary UVs"
+    );
+    let index_size = mesh.index_type_size;
+    anyhow::ensure!(
+        matches!(index_size, 2 | 4),
+        "unsupported index size {index_size}"
+    );
+    let vertices = mesh
+        .index_count
+        .checked_add(mesh.wire_count)
+        .and_then(|count| count.checked_mul(index_size))
+        .context("vertex data offset overflow")?;
+    let stride = 32
+        + usize::from(mesh.secondary_tex_coord.unwrap_or(0) > 0) * 8
+        + usize::from(mesh.vertex_color.unwrap_or(0) > 0) * 4;
+    let read = |offset: usize, size: usize| -> Result<&[u8]> {
+        bytes
+            .get(offset..offset.checked_add(size).context("mesh offset overflow")?)
+            .context("mesh payload too short")
+    };
+    let mut result = [[0.0; 2]; 3];
+    for (corner, uv) in result.iter_mut().enumerate() {
+        let offset = (first_index + corner)
+            .checked_mul(index_size)
+            .context("index offset overflow")?;
+        let index = if index_size == 2 {
+            u16::from_le_bytes(read(offset, 2)?.try_into()?) as usize
+        } else {
+            u32::from_le_bytes(read(offset, 4)?.try_into()?) as usize
+        };
+        anyhow::ensure!(index < mesh.vertex_count, "vertex index out of range");
+        let offset = index
+            .checked_mul(stride)
+            .and_then(|n| n.checked_add(vertices))
+            .and_then(|n| n.checked_add(12 + usize::from(secondary) * 8))
+            .context("UV offset overflow")?;
+        let data = read(offset, 8)?;
+        *uv = [
+            f32::from_le_bytes(data[..4].try_into()?),
+            -f32::from_le_bytes(data[4..].try_into()?),
+        ];
+    }
+    Ok(result)
+}
+
 pub fn decode_mesh(bytes: &[u8], mesh: &MeshDesc) -> Result<DecodedMesh> {
     let mut cursor = Cursor::new(bytes);
     let mut all_indices = Vec::with_capacity(mesh.index_count);
@@ -127,4 +188,55 @@ fn unpack_unit_vector(raw_x: u16, raw_y: u16) -> [f32; 3] {
     }
 
     [x, y, z]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uv_preflight_matches_decoder_with_wire_indices_secondary_uv_and_vertex_color() {
+        let desc: MeshDesc = serde_json::from_value(serde_json::json!({
+            "name":"layout", "file":"mesh.dat", "vertexCount":3,"indexCount":3,
+            "wireCount":2,"indexTypeSize":4,"secondaryTexCoord":1,"vertexColor":1,"subMeshes":[]
+        }))
+        .unwrap();
+        let mut bytes = Vec::new();
+        for value in [2_u32, 0, 1, 0, 1] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for i in 0..3 {
+            for value in [
+                i as f32,
+                1.0,
+                2.0,
+                0.1 + i as f32,
+                0.2 + i as f32,
+                3.1 + i as f32,
+                3.2 + i as f32,
+            ] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[0; 12]);
+            bytes.extend_from_slice(&[10, 20, 30, 255]);
+        }
+        let decoded = decode_mesh(&bytes, &desc).unwrap();
+        assert_eq!(
+            triangle_uvs(&bytes, &desc, 0, false).unwrap(),
+            [
+                decoded.texcoords[2],
+                decoded.texcoords[0],
+                decoded.texcoords[1]
+            ]
+        );
+        let secondary = decoded.secondary_texcoords.unwrap();
+        assert_eq!(
+            triangle_uvs(&bytes, &desc, 0, true).unwrap(),
+            [secondary[2], secondary[0], secondary[1]]
+        );
+        assert!(triangle_uvs(&bytes[..1], &desc, 0, false).is_err());
+        assert!(triangle_uvs(&bytes, &desc, 2, false).is_err());
+        bytes[..4].copy_from_slice(&99_u32.to_le_bytes());
+        assert!(triangle_uvs(&bytes, &desc, 0, false).is_err());
+    }
 }

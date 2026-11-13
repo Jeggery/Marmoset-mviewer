@@ -1,5 +1,6 @@
 mod animated;
 mod textures;
+mod uv;
 #[cfg(test)]
 mod tests;
 
@@ -17,7 +18,8 @@ use crate::archive::Archive;
 use crate::js_export::JsExportScene;
 use crate::mesh::{DecodedMesh, decode_mesh};
 use crate::scene::{Lights, MainCamera, MaterialDesc, Scene, ViewDesc};
-use textures::{bake_metallic_roughness, is_neutral_normal};
+use textures::{bake_emissive_repeat, convert_emissive, bake_metallic_roughness, is_neutral_normal};
+use uv::EmissiveAtlas;
 
 const SOURCE_TEXTURE_DIR: &str = "marmoset-source-texture";
 
@@ -125,6 +127,7 @@ pub fn export_scene_with_js_scene_progress(
     }
 
     let mut builder = GltfBuilder::default();
+    builder.repeating_emissive_materials = uv::repeating_materials(archive, scene)?;
     let mut material_lookup = HashMap::new();
     let mut texture_cache = HashMap::new();
 
@@ -172,6 +175,8 @@ pub(super) struct GltfBuilder {
     pub(super) image_sources: Vec<ImageSource>,
     pub(super) textures: Vec<TextureDef>,
     pub(super) materials: Vec<MaterialDef>,
+    emissive_atlases: HashMap<usize, EmissiveAtlas>,
+    repeating_emissive_materials: HashSet<String>,
     pub(super) meshes: Vec<MeshDef>,
     pub(super) nodes: Vec<NodeDef>,
     pub(super) cameras: Vec<CameraDef>,
@@ -240,22 +245,67 @@ impl GltfBuilder {
             None
         };
 
+        // Marmoset enables emission only when an emissive region is declared.
+        // Intensity multiplies that region, not a uniform white surface.
+        let emissive_range = material.extras_tex_coord_ranges.as_ref()
+            .and_then(|ranges| ranges.get("emissiveTex"));
+        let repeat_emissive = self.repeating_emissive_materials.contains(&material.name);
+        let emissive_texture = emissive_range.map(|range| -> Result<_> {
+            let [sx, sy, bx, by] = range.scale_bias;
+            anyhow::ensure!(range.scale_bias.iter().all(|v| v.is_finite()) && sx > 0.0 && sy > 0.0
+                && bx >= 0.0 && by >= 0.0 && bx + sx <= 1.00001 && by + sy <= 1.00001,
+                "invalid emissive atlas scaleBias");
+            let source = source(material.extras_tex.as_deref())?;
+            let bytes = if repeat_emissive {
+                bake_emissive_repeat(source, range.scale_bias)?
+            } else {
+                self.emissive_atlases.insert(material_id, EmissiveAtlas {
+                    secondary_uv: material.emissive_secondary_uv.unwrap_or(false),
+                });
+                if !self.extensions_used.iter().any(|name| name == "KHR_texture_transform") {
+                    self.extensions_used.push("KHR_texture_transform".into());
+                }
+                convert_emissive(source)?
+            };
+            Ok(self.add_baked_texture(format!("material_{material_id}_emissive.png"), bytes))
+        }).transpose()?;
+        let emissive_intensity = if emissive_texture.is_some() {
+            material.emissive_intensity.unwrap_or(1.0).max(0.0)
+        } else {
+            0.0
+        };
+        let extensions = if emissive_intensity > 1.0 {
+            let name = "KHR_materials_emissive_strength";
+            if !self.extensions_used.iter().any(|used| used == name) {
+                self.extensions_used.push(name.to_string());
+            }
+            Some(json!({ name: { "emissiveStrength": emissive_intensity } }))
+        } else {
+            None
+        };
         let material_index = self.materials.len();
         self.materials.push(MaterialDef {
             name: Some(material.name.clone()),
             pbr_metallic_roughness: Some(PbrMetallicRoughness {
                 base_color_factor,
-                base_color_texture: base_color_texture.map(|index| TextureRef { index, tex_coord: None }),
+                base_color_texture: base_color_texture.map(|index| TextureRef { index, tex_coord: None, extensions: None }),
                 metallic_factor: Some(metallic_factor),
                 roughness_factor: Some(roughness_factor),
-                metallic_roughness_texture: metallic_roughness_texture.map(|index| TextureRef { index, tex_coord: None }),
+                metallic_roughness_texture: metallic_roughness_texture.map(|index| TextureRef { index, tex_coord: None, extensions: None }),
             }),
             normal_texture: normal_texture.map(|index| NormalTextureRef { index, scale: None }),
-            emissive_factor: Some(if material.emissive_intensity.unwrap_or(0.0) > 0.0 {
-                [material.emissive_intensity.unwrap_or(1.0); 3]
-            } else {
-                [0.0, 0.0, 0.0]
+            emissive_factor: Some([emissive_intensity.min(1.0); 3]),
+            emissive_texture: emissive_texture.map(|index| TextureRef {
+                index,
+                tex_coord: if repeat_emissive { material.emissive_secondary_uv.unwrap_or(false).then_some(1) } else { Some(2) },
+                extensions: emissive_range.filter(|_| !repeat_emissive).map(|range| {
+                    let [sx, sy, bx, by] = range.scale_bias;
+                    TextureExtensions { transform: TextureTransform {
+                        scale: [sx, sy], offset: [bx, 1.0 - by - sy],
+                    } }
+                }),
             }),
+            extensions,
             alpha_mode,
             alpha_cutoff,
             double_sided: Some(matches!(material.blend.as_deref(), Some("alpha") | Some("add"))),
@@ -390,19 +440,19 @@ impl GltfBuilder {
     }
 
     pub(super) fn push_runtime_scalar_f32(&mut self, values: &[f32]) -> usize {
-        self.push_scalar_f32(values, Target::ArrayBuffer)
+        self.push_scalar_f32(values, Target::Untargeted)
     }
 
     pub(super) fn push_runtime_f32x3(&mut self, values: &[[f32; 3]]) -> usize {
-        self.push_f32x3(values, Target::ArrayBuffer)
+        self.push_f32x3(values, Target::Untargeted)
     }
 
     pub(super) fn push_runtime_f32x4(&mut self, values: &[[f32; 4]]) -> usize {
-        self.push_f32x4(values, Target::ArrayBuffer)
+        self.push_f32x4(values, Target::Untargeted)
     }
 
     pub(super) fn push_runtime_f32mat4(&mut self, values: &[[f32; 16]]) -> usize {
-        self.push_f32mat4(values, Target::ArrayBuffer)
+        self.push_f32mat4(values, Target::Untargeted)
     }
 
     #[allow(dead_code)]
@@ -426,6 +476,9 @@ impl GltfBuilder {
         material_lookup: &HashMap<String, usize>,
         skin_data: Option<&MeshSkinData>,
     ) -> Result<usize> {
+        let prepared = uv::prepare_mesh(mesh_desc, decoded, skin_data, material_lookup, &self.emissive_atlases)?;
+        let decoded = &prepared.decoded;
+        let skin_data = prepared.skin.as_ref();
         let position_accessor = self.push_f32x3(&decoded.positions, Target::ArrayBuffer);
         let normal_accessor = self.push_f32x3(&decoded.normals, Target::ArrayBuffer);
         let tangents: Vec<_> = decoded.normals.iter().zip(&decoded.tangents).zip(&decoded.bitangents)
@@ -433,6 +486,10 @@ impl GltfBuilder {
             .collect();
         let tangent_accessor = self.push_f32x4(&tangents, Target::ArrayBuffer);
         let texcoord_accessor = self.push_f32x2(&decoded.texcoords, Target::ArrayBuffer);
+        let secondary_texcoord_accessor = decoded.secondary_texcoords.as_ref()
+            .map(|uvs| self.push_f32x2(uvs, Target::ArrayBuffer));
+        let atlas_texcoord_accessor = prepared.primitives.iter().any(|p| p.atlas_uv)
+            .then(|| self.push_f32x2(&prepared.atlas_uvs, Target::ArrayBuffer));
         let color_accessor = decoded
             .colors
             .as_ref()
@@ -441,12 +498,14 @@ impl GltfBuilder {
             .map(|data| self.push_u16x4(&data.joints, Target::ArrayBuffer));
         let weights_accessor = skin_data
             .map(|data| self.push_f32x4(&data.weights, Target::ArrayBuffer));
+        let extra_joints_accessor = skin_data.and_then(|data| data.extra_joints.as_ref())
+            .map(|joints| self.push_u16x4(joints, Target::ArrayBuffer));
+        let extra_weights_accessor = skin_data.and_then(|data| data.extra_weights.as_ref())
+            .map(|weights| self.push_f32x4(weights, Target::ArrayBuffer));
 
         let mut primitives = Vec::new();
-        for sub_mesh in &mesh_desc.sub_meshes {
-            let end = sub_mesh.first_index + sub_mesh.index_count;
-            let indices = decoded.indices[sub_mesh.first_index..end].to_vec();
-            let index_accessor = self.push_u32(&indices, Target::ElementArrayBuffer);
+        for primitive in prepared.primitives {
+            let index_accessor = self.push_u32(&primitive.indices, Target::ElementArrayBuffer);
 
             primitives.push(PrimitiveDef {
                 attributes: Attributes {
@@ -454,12 +513,18 @@ impl GltfBuilder {
                     normal: Some(normal_accessor),
                     tangent: Some(tangent_accessor),
                     texcoord_0: Some(texcoord_accessor),
+                    // Indexed TEXCOORD semantics must be contiguous. The
+                    // dedicated atlas set is 2, even on meshes without UV1.
+                    texcoord_1: secondary_texcoord_accessor.or_else(|| primitive.atlas_uv.then_some(texcoord_accessor)),
+                    texcoord_2: if primitive.atlas_uv { atlas_texcoord_accessor } else { None },
                     color_0: color_accessor,
                     joints_0: joints_accessor,
                     weights_0: weights_accessor,
+                    joints_1: extra_joints_accessor,
+                    weights_1: extra_weights_accessor,
                 },
                 indices: index_accessor,
-                material: material_lookup.get(&sub_mesh.material).copied(),
+                material: primitive.material,
                 mode: Some(4),
             });
         }
@@ -625,6 +690,8 @@ impl GltfBuilder {
             } else {
                 Some(self.animations)
             },
+            extensions_required: self.extensions_used.iter().any(|name| name == "KHR_texture_transform")
+                .then(|| vec!["KHR_texture_transform".into()]),
             extensions_used: if self.extensions_used.is_empty() {
                 None
             } else {
@@ -950,7 +1017,10 @@ impl GltfBuilder {
             byte_offset,
             byte_length,
             byte_stride: None,
-            target: Some(target as u32),
+            target: match target {
+                Target::Untargeted => None,
+                _ => Some(target as u32),
+            },
         });
         index
     }
@@ -965,6 +1035,8 @@ impl GltfBuilder {
 
 #[derive(Copy, Clone)]
 enum Target {
+    // Animation samples and inverse bind matrices have no GPU buffer target.
+    Untargeted = 0,
     ArrayBuffer = 34962,
     ElementArrayBuffer = 34963,
 }
@@ -1495,6 +1567,8 @@ pub struct GltfRoot {
     pub animations: Option<Vec<AnimationDef>>,
     #[serde(rename = "extensionsUsed", skip_serializing_if = "Option::is_none")]
     pub extensions_used: Option<Vec<String>>,
+    #[serde(rename = "extensionsRequired", skip_serializing_if = "Option::is_none")]
+    pub extensions_required: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<RootExtensions>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1567,12 +1641,20 @@ pub struct Attributes {
     pub tangent: Option<usize>,
     #[serde(rename = "TEXCOORD_0", skip_serializing_if = "Option::is_none")]
     pub texcoord_0: Option<usize>,
+    #[serde(rename = "TEXCOORD_1", skip_serializing_if = "Option::is_none")]
+    pub texcoord_1: Option<usize>,
+    #[serde(rename = "TEXCOORD_2", skip_serializing_if = "Option::is_none")]
+    pub texcoord_2: Option<usize>,
     #[serde(rename = "COLOR_0", skip_serializing_if = "Option::is_none")]
     pub color_0: Option<usize>,
     #[serde(rename = "JOINTS_0", skip_serializing_if = "Option::is_none")]
     pub joints_0: Option<usize>,
     #[serde(rename = "WEIGHTS_0", skip_serializing_if = "Option::is_none")]
     pub weights_0: Option<usize>,
+    #[serde(rename = "JOINTS_1", skip_serializing_if = "Option::is_none")]
+    pub joints_1: Option<usize>,
+    #[serde(rename = "WEIGHTS_1", skip_serializing_if = "Option::is_none")]
+    pub weights_1: Option<usize>,
 }
 
 #[derive(serde::Serialize)]
@@ -1613,7 +1695,7 @@ pub struct BufferDef {
     pub uri: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 pub struct MaterialDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1623,6 +1705,10 @@ pub struct MaterialDef {
     pub normal_texture: Option<NormalTextureRef>,
     #[serde(rename = "emissiveFactor", skip_serializing_if = "Option::is_none")]
     pub emissive_factor: Option<[f32; 3]>,
+    #[serde(rename = "emissiveTexture", skip_serializing_if = "Option::is_none")]
+    pub emissive_texture: Option<TextureRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<serde_json::Value>,
     #[serde(rename = "alphaMode", skip_serializing_if = "Option::is_none")]
     pub alpha_mode: Option<String>,
     #[serde(rename = "alphaCutoff", skip_serializing_if = "Option::is_none")]
@@ -1633,7 +1719,7 @@ pub struct MaterialDef {
     pub extras: Option<serde_json::Value>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 pub struct PbrMetallicRoughness {
     #[serde(rename = "baseColorFactor", skip_serializing_if = "Option::is_none")]
     pub base_color_factor: Option<[f32; 4]>,
@@ -1647,14 +1733,28 @@ pub struct PbrMetallicRoughness {
     pub metallic_roughness_texture: Option<TextureRef>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 pub struct TextureRef {
     pub index: usize,
     #[serde(rename = "texCoord", skip_serializing_if = "Option::is_none")]
     pub tex_coord: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<TextureExtensions>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
+pub struct TextureExtensions {
+    #[serde(rename = "KHR_texture_transform")]
+    pub transform: TextureTransform,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct TextureTransform {
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
+}
+
+#[derive(serde::Serialize, Clone)]
 pub struct NormalTextureRef {
     pub index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]

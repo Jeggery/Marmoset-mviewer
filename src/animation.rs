@@ -489,15 +489,15 @@ fn sample_packed2(values: &[f32], frame: f32) -> Option<f32> {
     if values.is_empty() {
         return None;
     }
-    let lower = frame.floor().max(0.0) as usize;
-    let upper = frame.ceil().max(0.0) as usize;
-    if lower >= values.len() {
-        return values.last().copied();
-    }
+    // Packed2 samples repeat after numKeyframes in the Marmoset runtime.
+    // Clamping here freezes the last sample at clip/loop boundaries.
+    let frame = frame.max(0.0);
+    let lower = frame.floor() as usize % values.len();
+    let upper = (lower + 1).min(values.len() - 1);
     if lower == upper || upper >= values.len() {
         return values.get(lower).copied();
     }
-    let t = (frame - lower as f32).clamp(0.0, 1.0);
+    let t = frame.fract();
     Some(values[lower] + (values[upper] - values[lower]) * t)
 }
 
@@ -1030,6 +1030,15 @@ mod tests {
     use super::ParsedAnimationSet;
     use crate::archive::Archive;
     use crate::scene::Scene;
+
+    #[test]
+    fn packed_samples_wrap_at_their_own_frame_count() {
+        use super::sample_packed2;
+        let values = [2.0, 4.0, 8.0];
+        assert_eq!(sample_packed2(&values, 3.0), Some(2.0));
+        assert_eq!(sample_packed2(&values, 3.5), Some(3.0));
+        assert_eq!(sample_packed2(&values, 2.5), Some(8.0));
+    }
 
     #[test]
     fn parses_vivfox_animation_data() {

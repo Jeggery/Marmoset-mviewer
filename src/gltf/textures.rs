@@ -60,6 +60,50 @@ fn srgb_byte(linear: f32) -> u8 {
     (encoded * 255.0).round() as u8
 }
 
+pub(super) fn convert_emissive(bytes: Option<&[u8]>) -> Result<Vec<u8>> {
+    let mut image = decode(bytes)?.unwrap_or_else(|| RgbaImage::from_pixel(1, 1, Rgba([255; 4])));
+    // Preserve the complete atlas and its resolution. Only change its encoding.
+    for pixel in image.pixels_mut() {
+        for channel in &mut pixel.0[..3] {
+            *channel = srgb_byte((*channel as f32 / 255.0).powi(2));
+        }
+        pixel[3] = 255;
+    }
+    encode(image)
+}
+
+// Standard glTF transforms cannot express fract(UV) before an atlas transform
+// inside a triangle spanning a repeat seam. A material containing such a seam
+// uses one full-resolution repeating image on all its original primitives.
+pub(super) fn bake_emissive_repeat(bytes: Option<&[u8]>, range: [f32; 4]) -> Result<Vec<u8>> {
+    let image = decode(bytes)?.unwrap_or_else(|| RgbaImage::from_pixel(1, 1, Rgba([255; 4])));
+    let [sx, sy, bx, by] = range;
+    anyhow::ensure!(range.iter().all(|v| v.is_finite()) && sx > 0.0 && sy > 0.0
+        && bx >= 0.0 && by >= 0.0 && bx + sx <= 1.00001 && by + sy <= 1.00001,
+        "invalid emissive atlas scaleBias");
+    let width = image.width();
+    let height = image.height();
+    let mut output = RgbaImage::new(width, height);
+    for (x, y, pixel) in output.enumerate_pixels_mut() {
+        // Original WebGL textures flip Y; decoded image rows and exported UVs do not.
+        let u = bx + (x as f32 + 0.5) / width as f32 * sx;
+        let v = 1.0 - by - sy + (y as f32 + 0.5) / height as f32 * sy;
+        let px = (u * image.width() as f32 - 0.5).clamp(0.0, (image.width() - 1) as f32);
+        let py = (v * image.height() as f32 - 0.5).clamp(0.0, (image.height() - 1) as f32);
+        let (x0, y0) = (px.floor() as u32, py.floor() as u32);
+        let (x1, y1) = ((x0 + 1).min(image.width() - 1), (y0 + 1).min(image.height() - 1));
+        let (tx, ty) = (px.fract(), py.fract());
+        let rgb: [u8; 3] = std::array::from_fn(|c| {
+            let a = image.get_pixel(x0, y0)[c] as f32 * (1.0 - tx) + image.get_pixel(x1, y0)[c] as f32 * tx;
+            let b = image.get_pixel(x0, y1)[c] as f32 * (1.0 - tx) + image.get_pixel(x1, y1)[c] as f32 * tx;
+            // Match dG(rgb)=rgb*rgb, then encode for glTF's sRGB emissiveTexture.
+            srgb_byte(((a * (1.0 - ty) + b * ty) / 255.0).powi(2))
+        });
+        *pixel = Rgba([rgb[0], rgb[1], rgb[2], 255]);
+    }
+    encode(output)
+}
+
 fn brightness(rgb: [f32; 3]) -> f32 {
     (0.299 * rgb[0] * rgb[0] + 0.587 * rgb[1] * rgb[1] + 0.114 * rgb[2] * rgb[2]).sqrt()
 }
