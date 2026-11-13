@@ -488,6 +488,10 @@ const APP_HTML: &str = r#"<!doctype html>
       const selectedMeshes = Array.from(document.querySelectorAll('#meshList input[type="checkbox"]'))
         .filter(input => input.checked)
         .map(input => Number(input.dataset.meshIndex));
+      if (!selectedMeshes.length) {
+        setStatus('Select at least one mesh to export.');
+        return;
+      }
       const exportOptions = {
         format,
         includedMeshes: selectedMeshes,
@@ -1253,7 +1257,11 @@ fn current_export_defaults(state: &AppState) -> GuiExportOptions {
             Some("obj") => GuiExportFormat::Obj,
             _ => GuiExportFormat::Gltf,
         },
-        included_meshes: Vec::new(),
+        included_meshes: state
+            .js_export_scene
+            .as_ref()
+            .map(|scene| scene.meshes.iter().map(|mesh| mesh.index).collect())
+            .unwrap_or_default(),
         include_textures: state.settings.include_textures.unwrap_or(true),
         include_animations: state.settings.include_animations.unwrap_or(true),
         include_cameras: state.settings.include_cameras.unwrap_or(true),

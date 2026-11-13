@@ -57,10 +57,16 @@ pub struct MetaData {
     pub author: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct MainCamera {
     pub view: Option<ViewDesc>,
     pub post: Option<PostDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub far: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<[f32; 16]>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -1,5 +1,7 @@
 target/
 /dist/
+/tests/
+/docs/PROJECT_ANALYSIS.zh-CN.md
 test_output/
 test_data/*
 !test_data/*.mview

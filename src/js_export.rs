@@ -1,12 +1,15 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::archive::Archive;
-use crate::scene::{Lights, MainCamera, MaterialDesc, Scene};
+use crate::scene::{Lights, MainCamera, MaterialDesc, Scene, ViewDesc};
 use crate::{ExportOptions, ExportReport};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsExportScene {
@@ -202,6 +205,7 @@ pub enum GuiExportFormat {
 #[serde(rename_all = "camelCase")]
 pub struct GuiExportOptions {
     pub format: GuiExportFormat,
+    /// Exact source-scene mesh indices. An empty selection is rejected.
     #[serde(default)]
     pub included_meshes: Vec<usize>,
     #[serde(default = "default_true")]
@@ -223,18 +227,11 @@ pub fn export_from_js_scene_path(
     output_dir: &Path,
     js_scene: &JsExportScene,
 ) -> Result<ExportReport> {
-    export_from_js_scene_path_with_options_and_progress(
+    export_js_scene(
         input_path,
         output_dir,
         js_scene,
-        &GuiExportOptions {
-            format: GuiExportFormat::Gltf,
-            included_meshes: Vec::new(),
-            include_textures: true,
-            include_animations: true,
-            include_cameras: true,
-            include_lights: true,
-        },
+        None,
         |_progress, _stage| {},
     )
 }
@@ -243,25 +240,12 @@ pub fn export_from_js_scene_path_with_progress<F>(
     input_path: &Path,
     output_dir: &Path,
     js_scene: &JsExportScene,
-    mut progress: F,
+    progress: F,
 ) -> Result<ExportReport>
 where
     F: FnMut(u8, &str),
 {
-    export_from_js_scene_path_with_options_and_progress(
-        input_path,
-        output_dir,
-        js_scene,
-        &GuiExportOptions {
-            format: GuiExportFormat::Gltf,
-            included_meshes: Vec::new(),
-            include_textures: true,
-            include_animations: true,
-            include_cameras: true,
-            include_lights: true,
-        },
-        &mut progress,
-    )
+    export_js_scene(input_path, output_dir, js_scene, None, progress)
 }
 
 pub fn export_from_js_scene_path_with_options_and_progress<F>(
@@ -269,6 +253,25 @@ pub fn export_from_js_scene_path_with_options_and_progress<F>(
     output_dir: &Path,
     js_scene: &JsExportScene,
     export_options: &GuiExportOptions,
+    progress: F,
+) -> Result<ExportReport>
+where
+    F: FnMut(u8, &str),
+{
+    export_js_scene(
+        input_path,
+        output_dir,
+        js_scene,
+        Some(export_options),
+        progress,
+    )
+}
+
+fn export_js_scene<F>(
+    input_path: &Path,
+    output_dir: &Path,
+    js_scene: &JsExportScene,
+    export_options: Option<&GuiExportOptions>,
     mut progress: F,
 ) -> Result<ExportReport>
 where
@@ -288,13 +291,24 @@ where
         .get("scene.json")
         .context("scene.json not found in archive")?;
     let base_scene = Scene::from_bytes(&scene_entry.data)?;
+    // No-options helpers explicitly select all source meshes. An explicit empty
+    // selection from the GUI must never silently become "all".
+    let defaults = GuiExportOptions {
+        format: GuiExportFormat::Gltf,
+        included_meshes: (0..base_scene.meshes.len()).collect(),
+        include_textures: true,
+        include_animations: true,
+        include_cameras: true,
+        include_lights: true,
+    };
+    let export_options = export_options.unwrap_or(&defaults);
     progress(35, "Merging Marmoset runtime data");
     let mut merged_scene = merge_js_export_scene(&base_scene, js_scene);
     if !export_options.include_textures {
         strip_scene_textures(&mut merged_scene);
     }
-    let options = build_export_options(&merged_scene, export_options);
-    let filtered_scene = filter_scene_for_export(&merged_scene, &options);
+    let options = build_export_options(&merged_scene, export_options)?;
+    let filtered_scene = crate::filtered_scene(&merged_scene, &options);
 
     match export_options.format {
         GuiExportFormat::Gltf => {
@@ -337,7 +351,6 @@ where
                 input_path,
                 output_dir,
                 &crate::obj::ObjExportOptions {
-                    included_meshes: options.included_meshes.clone(),
                     include_textures: export_options.include_textures,
                 },
                 &mut |local_progress, stage| {
@@ -400,18 +413,13 @@ pub fn merge_js_export_scene(base_scene: &Scene, js_scene: &JsExportScene) -> Sc
         }
     }
 
-    if !js_scene.cameras.is_empty() {
-        let mut cameras = merged.cameras.clone();
-        for camera in &js_scene.cameras {
-            cameras.insert(
-                camera.name.clone(),
-                MainCamera {
-                    view: None,
-                    post: None,
-                },
-            );
-        }
-        merged.cameras = cameras;
+    for camera in &js_scene.cameras {
+        let target = if camera.name == "Main Camera" {
+            merged.main_camera.get_or_insert_default()
+        } else {
+            merged.cameras.entry(camera.name.clone()).or_default()
+        };
+        merge_camera(target, camera);
     }
 
     if !js_scene.lights.is_empty() {
@@ -421,15 +429,51 @@ pub fn merge_js_export_scene(base_scene: &Scene, js_scene: &JsExportScene) -> Sc
     merged
 }
 
-fn build_export_options(scene: &Scene, options: &GuiExportOptions) -> ExportOptions {
-    let mut export_options = ExportOptions::include_all(scene);
-    if !options.included_meshes.is_empty() {
-        export_options.included_meshes = options.included_meshes.iter().copied().collect();
+fn merge_camera(target: &mut MainCamera, camera: &JsCamera) {
+    if let Some(fov) = camera
+        .fov
+        .filter(|v| v.is_finite() && *v > 0.0 && *v < 180.0)
+    {
+        let view = target.view.get_or_insert(ViewDesc {
+            angles: None,
+            fov: None,
+            orbit_radius: None,
+            pivot: None,
+        });
+        view.fov = Some(fov);
     }
+    if let Some(near) = camera.near.filter(|v| v.is_finite() && *v > 0.0) {
+        target.near = Some(near);
+    }
+    if let Some(far) = camera
+        .far
+        .filter(|v| v.is_finite() && *v > target.near.unwrap_or(0.01))
+    {
+        target.far = Some(far);
+    }
+    if let Some(transform) = camera.transform.filter(|m| m.iter().all(|v| v.is_finite())) {
+        target.transform = Some(transform);
+    }
+}
+
+fn build_export_options(scene: &Scene, options: &GuiExportOptions) -> Result<ExportOptions> {
+    ensure!(
+        !options.included_meshes.is_empty(),
+        "Select at least one mesh to export"
+    );
+    ensure!(
+        options
+            .included_meshes
+            .iter()
+            .all(|&index| index < scene.meshes.len()),
+        "mesh selection contains an out-of-range source index"
+    );
+    let mut export_options = ExportOptions::include_all(scene);
+    export_options.included_meshes = options.included_meshes.iter().copied().collect();
     export_options.include_animations = options.include_animations;
     export_options.include_cameras = options.include_cameras;
     export_options.include_lights = options.include_lights;
-    export_options
+    Ok(export_options)
 }
 
 fn build_lights_from_js(js_lights: &[JsLight], fallback: Option<&Lights>) -> Lights {
@@ -462,43 +506,6 @@ fn build_lights_from_js(js_lights: &[JsLight], fallback: Option<&Lights>) -> Lig
         spot: Some(spot),
         matrix_weights: Some(matrix_weights),
     }
-}
-
-fn filter_scene_for_export(scene: &Scene, options: &ExportOptions) -> Scene {
-    let mut filtered = scene.clone();
-    filtered.meshes = scene
-        .meshes
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| options.included_meshes.contains(index))
-        .map(|(_, mesh)| mesh.clone())
-        .collect();
-
-    if let Some(anim_data) = &scene.anim_data {
-        let mut filtered_anim = anim_data.clone();
-        filtered_anim.mesh_ids = anim_data
-            .mesh_ids
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| options.included_meshes.contains(index))
-            .map(|(_, mesh_id)| mesh_id.clone())
-            .collect();
-        filtered.anim_data = options.include_animations.then_some(filtered_anim);
-    }
-
-    if !options.include_cameras {
-        filtered.main_camera = None;
-        filtered.cameras.clear();
-        if let Some(anim_data) = &mut filtered.anim_data {
-            anim_data.selected_camera = None;
-        }
-    }
-
-    if !options.include_lights {
-        filtered.lights = None;
-    }
-
-    filtered
 }
 
 fn strip_scene_textures(scene: &mut Scene) {

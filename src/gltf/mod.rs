@@ -773,11 +773,17 @@ impl GltfBuilder {
             camera_type: "perspective".to_string(),
             perspective: PerspectiveDef {
                 yfov: fov_deg.to_radians(),
-                znear: 0.01,
-                zfar: None,
+                znear: camera.near.unwrap_or(0.01),
+                zfar: camera.far.filter(|far| *far > camera.near.unwrap_or(0.01)),
             },
         });
         let (translation, rotation) = camera_transform_from_view(view);
+        let (translation, rotation, scale) = if let Some(matrix) = camera.transform {
+            let (translation, rotation, scale) = decompose_matrix_trs(matrix);
+            (translation, rotation, Some(scale))
+        } else {
+            (translation, rotation, None)
+        };
         let node_index = self.nodes.len();
         self.nodes.push(NodeDef {
             name: Some(name.to_string()),
@@ -786,7 +792,7 @@ impl GltfBuilder {
             matrix: None,
             translation: Some(translation),
             rotation: Some(rotation),
-            scale: None,
+            scale,
             children: None,
             camera: Some(camera_index),
             extensions: None,
@@ -818,8 +824,8 @@ impl GltfBuilder {
             camera_type: "perspective".to_string(),
             perspective: PerspectiveDef {
                 yfov: fov_deg.to_radians(),
-                znear: 0.01,
-                zfar: None,
+                znear: camera.near.unwrap_or(0.01),
+                zfar: camera.far.filter(|far| *far > camera.near.unwrap_or(0.01)),
             },
         });
         self.nodes[node_index].camera = Some(camera_index);

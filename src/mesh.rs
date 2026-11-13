@@ -79,6 +79,36 @@ pub(crate) fn triangle_uvs(
 }
 
 pub fn decode_mesh(bytes: &[u8], mesh: &MeshDesc) -> Result<DecodedMesh> {
+    anyhow::ensure!(
+        matches!(mesh.index_type_size, 2 | 4),
+        "unsupported index size {}",
+        mesh.index_type_size
+    );
+    let vertex_start = mesh
+        .index_count
+        .checked_add(mesh.wire_count)
+        .and_then(|count| count.checked_mul(mesh.index_type_size))
+        .context("mesh index data size overflow")?;
+    let stride = 32
+        + usize::from(mesh.secondary_tex_coord.unwrap_or(0) > 0) * 8
+        + usize::from(mesh.vertex_color.unwrap_or(0) > 0) * 4;
+    let required = mesh
+        .vertex_count
+        .checked_mul(stride)
+        .and_then(|size| vertex_start.checked_add(size))
+        .context("mesh vertex data size overflow")?;
+    anyhow::ensure!(
+        required <= bytes.len(),
+        "mesh payload too short for declared counts"
+    );
+    for sub in &mesh.sub_meshes {
+        anyhow::ensure!(
+            sub.first_index
+                .checked_add(sub.index_count)
+                .is_some_and(|end| end <= mesh.index_count),
+            "submesh indices out of range"
+        );
+    }
     let mut cursor = Cursor::new(bytes);
     let mut all_indices = Vec::with_capacity(mesh.index_count);
 
@@ -88,6 +118,10 @@ pub fn decode_mesh(bytes: &[u8], mesh: &MeshDesc) -> Result<DecodedMesh> {
             4 => cursor.read_u32::<LittleEndian>()?,
             other => bail!("unsupported index size {}", other),
         };
+        anyhow::ensure!(
+            (index as usize) < mesh.vertex_count,
+            "vertex index out of range"
+        );
         all_indices.push(index);
     }
 
@@ -193,6 +227,23 @@ fn unpack_unit_vector(raw_x: u16, raw_y: u16) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_malformed_counts_and_indices_before_allocating_vertex_arrays() {
+        let mut desc: MeshDesc = serde_json::from_value(serde_json::json!({
+            "name":"bad", "file":"mesh.dat", "vertexCount":3,"indexCount":3,
+            "wireCount":0,"indexTypeSize":2,"subMeshes":[]
+        }))
+        .unwrap();
+        let mut bytes = vec![0; 6 + 3 * 32];
+        assert!(decode_mesh(&bytes, &desc).is_ok());
+        bytes[..2].copy_from_slice(&3_u16.to_le_bytes());
+        assert!(decode_mesh(&bytes, &desc).is_err());
+        desc.vertex_count = usize::MAX;
+        assert!(decode_mesh(&[], &desc).is_err());
+        desc.index_count = usize::MAX;
+        assert!(decode_mesh(&[], &desc).is_err());
+    }
 
     #[test]
     fn uv_preflight_matches_decoder_with_wire_indices_secondary_uv_and_vertex_color() {

@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::archive::Archive;
@@ -117,7 +117,25 @@ impl ParsedAnimationSet {
 
         let mut animations = Vec::with_capacity(anim.animations.len());
         for animation in &anim.animations {
-            animations.push(parse_animation(archive, animation)?);
+            let parsed = parse_animation(archive, animation)?;
+            for object in &parsed.animated_objects {
+                if let Ok(index) = usize::try_from(object.desc.skinning_rig_index) {
+                    let rig = skinning_rigs
+                        .get(index)
+                        .context("animation skinning rig index out of range")?;
+                    ensure!(
+                        rig.clusters
+                            .iter()
+                            .all(|cluster| (cluster.link_object_index as usize)
+                                < parsed.animated_objects.len()
+                                && (cluster.link_mode != 1
+                                    || (cluster.associate_object_index as usize)
+                                        < parsed.animated_objects.len())),
+                        "skinning cluster object index out of range"
+                    );
+                }
+            }
+            animations.push(parsed);
         }
 
         Ok(Some(Self {
@@ -383,12 +401,11 @@ fn parse_matrix_table(archive: &Archive, expected_count: usize) -> Result<Matrix
         .get("MatTable.bin")
         .context("AnimData references MatTable.bin but it is missing")?;
     let mut cursor = Cursor::new(entry.data.as_slice());
-    let float_count = entry.data.len() / 4;
-    if float_count % 16 != 0 {
+    if entry.data.len() % 64 != 0 {
         bail!("MatTable.bin length is not aligned to 16 floats");
     }
 
-    let matrix_count = float_count / 16;
+    let matrix_count = entry.data.len() / 64;
     let mut matrices = Vec::with_capacity(matrix_count);
     for _ in 0..matrix_count {
         let mut matrix = [0.0f32; 16];
@@ -890,6 +907,7 @@ fn parse_skinning_rig(
 }
 
 fn parse_animation(archive: &Archive, animation: &AnimationDesc) -> Result<ParsedAnimation> {
+    validate_animation_references(animation)?;
     let mut animated_objects = Vec::with_capacity(animation.animated_objects.len());
     for object in &animation.animated_objects {
         let keyframes = if object.file.is_empty() {
@@ -898,10 +916,10 @@ fn parse_animation(archive: &Archive, animation: &AnimationDesc) -> Result<Parse
             let entry = archive
                 .get(&object.file)
                 .with_context(|| format!("missing keyframe file {}", object.file))?;
-            Some(parse_keyframe_file(
-                &entry.data,
-                &object.animated_properties,
-            )?)
+            Some(
+                parse_keyframe_file(&entry.data, &object.animated_properties)
+                    .with_context(|| format!("invalid keyframe file {}", object.file))?,
+            )
         };
         animated_objects.push(ParsedAnimatedObject {
             desc: object.clone(),
@@ -914,10 +932,61 @@ fn parse_animation(archive: &Archive, animation: &AnimationDesc) -> Result<Parse
     })
 }
 
-fn parse_keyframe_file(bytes: &[u8], properties: &[AnimatedPropertyDesc]) -> Result<KeyframeFile> {
-    if bytes.len() < 4 {
-        bail!("keyframe file too short");
+fn validate_animation_references(animation: &AnimationDesc) -> Result<()> {
+    ensure!(
+        animation.original_fps.is_finite() && animation.original_fps > 0.0,
+        "animation FPS must be finite and positive"
+    );
+    ensure!(
+        animation.total_frames <= (i32::MAX / 1000) as usize,
+        "animation frame count exceeds supported sampling range"
+    );
+    let objects = &animation.animated_objects;
+    for object in objects {
+        ensure!(
+            object.parent_index < objects.len(),
+            "animation parent index out of range"
+        );
+        ensure!(
+            object.model_part_index < objects.len(),
+            "animation model-part index out of range"
+        );
+        ensure!(
+            object.model_part_fps.is_finite() && object.model_part_fps > 0.0,
+            "model-part FPS must be finite and positive"
+        );
     }
+    // Self-parented roots are valid. Longer cycles are not; validate once before
+    // the transform evaluators use these references as direct indices.
+    let mut states = vec![0u8; objects.len()];
+    for start in 0..objects.len() {
+        let mut index = start;
+        while states[index] == 0 {
+            states[index] = 1;
+            let parent = objects[index].parent_index;
+            if parent == index {
+                break;
+            }
+            index = parent;
+        }
+        ensure!(
+            states[index] != 1 || objects[index].parent_index == index,
+            "animation parent hierarchy contains a cycle"
+        );
+        let mut index = start;
+        while states[index] == 1 {
+            states[index] = 2;
+            index = objects[index].parent_index;
+        }
+    }
+    Ok(())
+}
+
+fn parse_keyframe_file(bytes: &[u8], properties: &[AnimatedPropertyDesc]) -> Result<KeyframeFile> {
+    ensure!(
+        bytes.len() >= 4 && bytes.len().is_multiple_of(4),
+        "keyframe file too short or unaligned"
+    );
 
     let float_count = bytes.len() / 4;
     let u16_count = bytes.len() / 2;
@@ -943,6 +1012,10 @@ fn parse_keyframe_file(bytes: &[u8], properties: &[AnimatedPropertyDesc]) -> Res
     let mut next_float_index = 1usize
         .checked_add(header_words as usize)
         .context("keyframe header index overflow")?;
+    ensure!(
+        header_words as usize >= properties.len() && next_float_index <= floats.len(),
+        "keyframe shared header out of bounds"
+    );
 
     let mut parsed_properties = Vec::with_capacity(properties.len());
     for (property_index, property) in properties.iter().enumerate() {
@@ -958,6 +1031,17 @@ fn parse_keyframe_file(bytes: &[u8], properties: &[AnimatedPropertyDesc]) -> Res
         let num_keyframes = u16s[u16_base] as usize;
         let packing_type = bytes[byte_base + 2];
         let interpolation_type = bytes[byte_base + 3];
+        let stride = match packing_type {
+            0 => 4,
+            1 => 2,
+            2 => 1,
+            other => bail!("unsupported keyframe packing type {other}"),
+        };
+        let end = num_keyframes
+            .checked_mul(stride)
+            .and_then(|count| next_float_index.checked_add(count))
+            .context("keyframe data length overflow")?;
+        ensure!(end <= floats.len(), "keyframe property data out of bounds");
 
         let data = match packing_type {
             0 => {
@@ -1030,6 +1114,56 @@ mod tests {
     use super::ParsedAnimationSet;
     use crate::archive::Archive;
     use crate::scene::Scene;
+
+    #[test]
+    fn rejects_truncated_keyframes_for_every_packing_type() {
+        let properties = vec![crate::scene::AnimatedPropertyDesc {
+            name: "Translation X".into(),
+        }];
+        for packing in 0..=2 {
+            let mut bytes = 1_u32.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&[1, 0, packing, 0]);
+            assert!(super::parse_keyframe_file(&bytes, &properties).is_err());
+            let stride = [16, 8, 4][packing as usize];
+            bytes.extend(vec![0; stride]);
+            assert!(super::parse_keyframe_file(&bytes, &properties).is_ok());
+        }
+        assert!(super::parse_keyframe_file(&u32::MAX.to_le_bytes(), &properties).is_err());
+        assert!(super::parse_keyframe_file(&[0; 5], &[]).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_object_references_and_parent_cycles() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/vivfox.mview");
+        let archive = Archive::from_path(&path).unwrap();
+        let scene = Scene::from_bytes(&archive.get("scene.json").unwrap().data).unwrap();
+        let original = &scene.anim_data.as_ref().unwrap().animations[0];
+        assert!(super::parse_animation(&archive, original).is_ok());
+        for model_part in [false, true] {
+            let mut invalid = original.clone();
+            if model_part {
+                invalid.animated_objects[0].model_part_index = usize::MAX;
+            } else {
+                invalid.animated_objects[0].parent_index = usize::MAX;
+            }
+            assert!(super::parse_animation(&archive, &invalid).is_err());
+        }
+        let mut invalid = original.clone();
+        invalid.animated_objects[0].parent_index = 1;
+        invalid.animated_objects[1].parent_index = 0;
+        assert!(
+            super::parse_animation(&archive, &invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("cycle")
+        );
+        let mut invalid = original.clone();
+        invalid.original_fps = 0.0;
+        assert!(super::parse_animation(&archive, &invalid).is_err());
+        invalid.original_fps = original.original_fps;
+        invalid.total_frames = usize::MAX;
+        assert!(super::parse_animation(&archive, &invalid).is_err());
+    }
 
     #[test]
     fn packed_samples_wrap_at_their_own_frame_count() {

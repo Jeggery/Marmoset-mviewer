@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +9,6 @@ use crate::scene::Scene;
 
 #[derive(Debug, Clone)]
 pub struct ObjExportOptions {
-    pub included_meshes: BTreeSet<usize>,
     pub include_textures: bool,
 }
 
@@ -43,10 +41,6 @@ pub fn export_scene(
     let mut normal_base = 1usize;
 
     for (mesh_index, mesh_desc) in scene.meshes.iter().enumerate() {
-        if !options.included_meshes.contains(&mesh_index) {
-            continue;
-        }
-
         let entry = archive
             .get(&mesh_desc.file)
             .with_context(|| format!("missing mesh payload {}", mesh_desc.file))?;
@@ -59,7 +53,10 @@ pub fn export_scene(
             obj.push_str(&format!("v {} {} {}\n", position[0], position[1], position[2]));
         }
         for texcoord in &decoded.texcoords {
-            obj.push_str(&format!("vt {} {}\n", texcoord[0], texcoord[1]));
+            // decode_mesh negates source V for glTF's image convention. OBJ
+            // references the untouched source images using bottom-left UVs,
+            // so undo that conversion here. Keep U and tiled UVs unchanged.
+            obj.push_str(&format!("vt {} {}\n", texcoord[0], -texcoord[1]));
         }
         for normal in &decoded.normals {
             let normal = transform_normal(mesh_desc.transform.as_ref(), *normal);
@@ -217,4 +214,64 @@ fn archive_relative_output_path(name: &str) -> PathBuf {
 
 fn path_to_slash(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn obj_restores_source_uv_orientation_without_mirroring_u_or_wrapping_tiles() {
+        let source_uvs: [[f32; 2]; 3] = [[0.125, 0.25], [-0.75, 2.125], [1.75, -0.375]];
+        let scene: Scene = serde_json::from_value(serde_json::json!({
+            "materials": [],
+            "meshes": [{"name":"triangle", "file":"mesh.dat", "vertexCount":3,
+                "indexCount":3,"wireCount":0,"indexTypeSize":2,
+                "subMeshes":[{"material":"plain","firstIndex":0,"indexCount":3}]}]
+        }))
+        .unwrap();
+        let mut mesh = vec![0, 0, 1, 0, 2, 0];
+        for (index, uv) in source_uvs.iter().enumerate() {
+            for value in [index as f32, 0.0, 0.0, uv[0], uv[1]] {
+                mesh.extend_from_slice(&value.to_le_bytes());
+            }
+            mesh.extend_from_slice(&[0; 12]);
+        }
+        let mut bytes = b"mesh.dat\0bin\0".to_vec();
+        for value in [0, mesh.len() as u32, mesh.len() as u32] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&mesh);
+        let archive = Archive::from_bytes(&bytes).unwrap();
+
+        // The shared decoder must retain its glTF convention. Only OBJ adapts
+        // the V direction at the output boundary.
+        let decoded = decode_mesh(&mesh, &scene.meshes[0]).unwrap();
+        assert_eq!(decoded.texcoords[0], [0.125, -0.25]);
+        for include_textures in [false, true] {
+            let output = tempfile::tempdir().unwrap();
+            export_scene(
+                &archive,
+                &scene,
+                Path::new("triangle.mview"),
+                output.path(),
+                &ObjExportOptions { include_textures },
+                &mut |_, _| {},
+            )
+            .unwrap();
+            let obj = fs::read_to_string(output.path().join("triangle.obj")).unwrap();
+            let actual: Vec<[f32; 2]> = obj
+                .lines()
+                .filter_map(|line| line.strip_prefix("vt "))
+                .map(|line| {
+                    let values: Vec<f32> = line
+                        .split_whitespace()
+                        .map(|s| s.parse().unwrap())
+                        .collect();
+                    [values[0], values[1]]
+                })
+                .collect();
+            assert_eq!(actual, source_uvs);
+        }
+    }
 }
