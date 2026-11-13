@@ -105,6 +105,9 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Generate release icons
+        run: cargo run --release --locked --example generate_icons -- dist/generated-icons
+
       - name: Prepare package directory
         shell: bash
         run: |
@@ -114,7 +117,7 @@ jobs:
           cp LICENSE 2>/dev/null dist/mviewer/LICENSE || true
           cp target/release/${{ matrix.bin_name }} dist/mviewer/${{ matrix.bin_name }}
           mkdir -p dist/mviewer/icons
-          cp target/generated-icons/mviewer-256.png dist/mviewer/icons/mviewer.png
+          cp dist/generated-icons/mviewer-256.png dist/mviewer/icons/mviewer.png
 
       - name: Add Linux desktop launcher
         if: runner.os == 'Linux'
@@ -160,8 +163,8 @@ jobs:
           </plist>
           mkdir -p icon.iconset
           for size in 16 32 128 256 512; do
-            cp "target/generated-icons/mviewer-${size}.png" "icon.iconset/icon_${size}x${size}.png"
-            cp "target/generated-icons/mviewer-$((size * 2)).png" "icon.iconset/icon_${size}x${size}@2x.png"
+            cp "dist/generated-icons/mviewer-${size}.png" "icon.iconset/icon_${size}x${size}.png"
+            cp "dist/generated-icons/mviewer-$((size * 2)).png" "icon.iconset/icon_${size}x${size}@2x.png"
           done
           iconutil -c icns icon.iconset -o "$APP_DIR/Contents/Resources/AppIcon.icns"
           rm -rf icon.iconset

@@ -201,6 +201,13 @@ tests the release platforms, and uses that version's changelog section as releas
 notes. Manual runs also require an explicit existing tag. Releases are published
 to the repository running the workflow, including forks.
 
+Release icons are generated explicitly during packaging, independently of Cargo's
+build cache. To generate them locally:
+
+```text
+cargo run --release --locked --example generate_icons -- dist/generated-icons
+```
+
 </details>
 
 ## Project and format references

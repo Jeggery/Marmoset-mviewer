@@ -56,6 +56,9 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      - name: Generate release icons
+        run: cargo run --release --locked --example generate_icons -- dist/generated-icons
+
       - name: Test
         run: cargo test --release --locked --lib
 

@@ -37,6 +37,11 @@
   platform installation and export instructions.
 - Fix validation of relative homepage links in the GitHub Pages build.
 
+### Packaging
+
+- Generate release icons explicitly before packaging so cached builds and Cargo
+  output directory layouts cannot leave release bundles without required icons.
+
 ## 3.0.0 - 2026-11-11
 
 First major release of [Jeggery/Marmoset-mviewer](https://github.com/Jeggery/Marmoset-mviewer),
