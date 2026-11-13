@@ -1,5 +1,42 @@
 # Changelog
 
+## 3.0.1 - 2026-11-13
+
+### glTF and GLB export
+
+- Fix invalid empty node children arrays and incorrect bufferView targets in
+  animated exports.
+- Correct initial skinning poses, scene scaling, animation timing, and clip
+  duration. Preserve constant transform components when switching clips and
+  support up to eight skin influences per vertex without discarding weights.
+- Fix emissive color conversion and intensity handling to prevent models from
+  appearing white or excessively bright.
+- Preserve emissive texture resolution, atlas coordinates, and UV tiling without
+  adding materials or splitting mesh primitives.
+- Preserve camera descriptions when merging runtime snapshots, including FOV,
+  clipping planes, and static transforms. Keep animated camera transforms intact.
+
+### OBJ and mesh selection
+
+- Correct OBJ texture orientation so source textures display properly without
+  manual UV flipping.
+- Fix selective OBJ exports that could produce empty or incomplete geometry.
+- Reject empty and out-of-range mesh selections before writing export files.
+
+### Scene loading and reliability
+
+- Return errors for malformed archive lengths, duplicate entries, truncated
+  keyframes, invalid mesh counts and indices, and cyclic animation references.
+- Bound archive loading and decompression: default limits are 512 MiB per input
+  or decoded entry, 1 GiB of total decoded data, and 65,536 entries. Library
+  callers can configure these limits.
+
+### Documentation
+
+- Refresh the project website and README, and add an illustrated GUI guide with
+  platform installation and export instructions.
+- Fix validation of relative homepage links in the GitHub Pages build.
+
 ## 3.0.0 - 2026-11-11
 
 First major release of [Jeggery/Marmoset-mviewer](https://github.com/Jeggery/Marmoset-mviewer),

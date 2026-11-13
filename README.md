@@ -2,7 +2,7 @@
   <img src="marmoset_logo_red.png" alt="mviewer icon" width="96">
 </p>
 
-# Marmoset-mviewer v3.0
+# Marmoset-mviewer v3.0.1
 
 Rust-native viewer and exporter for Marmoset `.mview` scenes. One binary provides
 an embedded desktop preview and a CLI: glTF/GLB export is available in both,
@@ -188,11 +188,11 @@ cargo run --release --locked -- test_data/vivfox.mview test_output/vivfox_glb --
 <details>
 <summary>Release preparation</summary>
 
-The package version is `3.0.0`; the release tag is `v3.0` (`v3.0.0` is also accepted).
+The package version is `3.0.1`; use the matching release tag `v3.0.1`.
 
 1. Update `Cargo.toml`, `Cargo.lock`, and the matching [changelog](CHANGELOG.md) section.
 2. Run `cargo test --release --locked --lib` and, with Python 3.11+,
-   `python scripts/release_metadata.py --tag v3.0`.
+   `python scripts/release_metadata.py --tag v3.0.1`.
 3. Review and commit the changes, then create and push the matching version tag
    to trigger the [release workflow](.github/workflows/release.yml).
 
@@ -207,8 +207,7 @@ to the repository running the workflow, including forks.
 
 Maintained by [Jeggery](https://github.com/Jeggery) in
 [Jeggery/Marmoset-mviewer](https://github.com/Jeggery/Marmoset-mviewer), based on
-upstream v2.1.2. See the [v3.0 changelog](CHANGELOG.md) for workflow, caching,
-and PBR export changes.
+upstream v2.1.2. See the [changelog](CHANGELOG.md) for export fixes and release history.
 
 The project reads `.mview` archives with a Rust backend and uses the embedded
 Marmoset runtime for desktop preview. The older Python/Noesis workflow has been replaced.

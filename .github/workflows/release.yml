@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing release tag matching Cargo.toml (e.g. v3.0)"
+        description: "Existing release tag matching Cargo.toml (e.g. v3.0.1)"
         required: true
-        default: "v3.0"
+        default: "v3.0.1"
         type: string
 
 concurrency:
